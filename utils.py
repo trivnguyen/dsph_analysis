@@ -24,14 +24,14 @@ from .profiles import (
     ln_g_osipkov_merritt,
 )
 
-# Re-export from jeans.solver
-from .jeans.solver import (
-    calc_ln_sigma2_nu,
-    calc_ln_sigma2p_Sigma,
-    calc_sigma2_los,
-    calc_vsp1,
-    calc_vsp2,
-)
+# # Re-export from jeans.solver
+# from .jeans.solver import (
+#     calc_ln_sigma2_nu,
+#     calc_ln_sigma2p_Sigma,
+#     calc_sigma2_los,
+#     calc_vsp1,
+#     calc_vsp2,
+# )
 
 # Re-export from data_utils
 from .data_utils import (
