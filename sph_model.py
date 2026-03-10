@@ -18,40 +18,53 @@ class GeneralizedOMJeans:
     radius r_a.
 
     Model parameters:
-    - log_rho_s: Logarithm of the characteristic density of the dark matter halo
-    - log_r_s: Logarithm of the scale radius of the dark matter halo
+    - log_rho_s : Logarithm of the characteristic density of the dark matter halo
+    - log_r_s   : Logarithm of the scale radius of the dark matter halo
+    - alp       : Transition sharpness of the generalized NFW profile
+    - bet       : Outer slope of the generalized NFW profile
+    - gam       : Inner slope of the generalized NFW profile
+    - log_r_a   : Logarithm of the anisotropy radius for the OM
+    - two_to_beta0 : 2 raised to the power of the central anisotropy
+    - two_to_betainf : 2 raised to the power of the outer anisotropy
+    - rh        : Plummer scale radius for the stellar distribution
+    - vsys_los   : Systematic velocity offset for line-of-sight velocities
+    - vsys_pmR   : Systematic velocity offset for radial proper motions
+    - vsys_pmT   : Systematic velocity offset for tangential proper motions
 
     """
-    def __init__(self, theta, min_radius=1e-3, max_radius=5, n_radius=200):
+    def __init__(self, theta, min_rgrid=1e-3, max_rgrid=50, n_grid=500):
         """
         Args:
             theta (list): Model parameters [log_rho_s, log_r_s, alp, bet, gam,
                 log_r_a, two_to_beta0, two_to_betainf, rh,
                 vsys_los, vsys_pmR, vsys_pmT].
-            min_radius (float, optional): Minimum radius [kpc]. Defaults to 1e-3.
-            max_radius (float, optional): Maximum radius [kpc]. Defaults to 5.
-            n_radius (int, optional): Number of radius points. Defaults to 200.
         """
         self.param = theta
         self.log_rho_s = self.param[0]
-        self.rho_s = 10.0 ** self.param[0]
         self.log_r_s = self.param[1]
-        self.r_s = 10.0 ** self.param[1]
         self.alp = self.param[2]
         self.bet = self.param[3]
         self.gam = self.param[4]
         self.log_r_a = self.param[5]
-        self.r_a = 10.0 ** self.param[5]
         self.two_to_beta0 = self.param[6]
-        self.beta0 = np.log2(self.two_to_beta0)
         self.two_to_betainf = self.param[7]
-        self.betainf = np.log2(self.two_to_betainf)
         self.rh = self.param[8]
         self.vsys_los = self.param[9]
         self.vsys_pmR = self.param[10]
         self.vsys_pmT = self.param[11]
 
-        self.r_vec = np.logspace(np.log10(min_radius), np.log10(max_radius), n_radius)
+        # derived parameters
+        self.rho_s = 10.0 ** self.log_rho_s
+        self.r_s = 10.0 ** self.log_r_s
+        self.r_a = 10.0 ** self.log_r_a
+        self.beta0 = np.log2(self.two_to_beta0)
+        self.betainf = np.log2(self.two_to_betainf)
+
+        # interpolation grid for sigma_r^2
+        self.min_rgrid = min_rgrid
+        self.max_rgrid = max_rgrid
+        self.n_grid = n_grid
+        self.r_grid = np.logspace(np.log10(self.min_rgrid), np.log10(self.max_rgrid), self.n_grid)
 
     def rho(self, r):
         """Dark matter density profile (generalized NFW)."""
@@ -139,33 +152,30 @@ class GeneralizedOMJeans:
         integral, _ = quad(integrand, R, np.inf, epsabs=1, epsrel=1)
         return 2.0 / self.I(R) * integral
 
-    def sigma2(self, r_vec):
+    def sigma2_grid_fn(self, r_grid):
         """Compute sigma_r^2 over an array of radii and return an interpolator."""
         return interp1d(
-            r_vec,
-            list(map(self._sigma2_r, r_vec)),
+            r_grid,
+            list(map(self._sigma2_r, r_grid)),
             bounds_error=False,
             fill_value=0.0,
             kind="linear",
         )
 
-    def sigma2_los(self, min_radius=1e-3):
+    def sigma2_los(self, r):
         """Compute the line-of-sight velocity dispersion profile."""
-        r_grid = np.logspace(np.log10(min_radius), np.log10(50), 500)
-        sigma2_r_fn = self.sigma2(r_grid)
-        return np.array([self._sigma2_los_R(R, sigma2_r_fn) for R in self.r_vec])
+        sigma2_r_fn = self.sigma2_grid_fn(self.r_grid)
+        return np.array([self._sigma2_los_R(R, sigma2_r_fn) for R in r])
 
-    def sigma2_pmR(self, min_radius=1e-3):
+    def sigma2_pmR(self, r):
         """Compute the radial proper motion velocity dispersion profile."""
-        r_grid = np.logspace(np.log10(min_radius), np.log10(50), 500)
-        sigma2_r_fn = self.sigma2(r_grid)
-        return np.array([self._sigma2_pmR_R(R, sigma2_r_fn) for R in self.r_vec])
+        sigma2_r_fn = self.sigma2_grid_fn(self.r_grid)
+        return np.array([self._sigma2_pmR_R(R, sigma2_r_fn) for R in r])
 
-    def sigma2_pmT(self, min_radius=1e-3):
+    def sigma2_pmT(self, r):
         """Compute the tangential proper motion velocity dispersion profile."""
-        r_grid = np.logspace(np.log10(min_radius), np.log10(50), 500)
-        sigma2_r_fn = self.sigma2(r_grid)
-        return np.array([self._sigma2_pmT_R(R, sigma2_r_fn) for R in self.r_vec])
+        sigma2_r_fn = self.sigma2_grid_fn(self.r_grid)
+        return np.array([self._sigma2_pmT_R(R, sigma2_r_fn) for R in r])
 
 
 class TwoPopGeneralizedOMJeans:
@@ -178,7 +188,22 @@ class TwoPopGeneralizedOMJeans:
     Model parameters:
     - log_rho_s : Logarithm of the characteristic density of the dark matter halo
     - log_r_s   : Logarithm of the scale radius of the dark matter halo
-    - w1        : Mixture weight for population 1 (w2 = 1 - w1)
+    - alp       : Transition sharpness of the generalized NFW profile
+    - bet       : Outer slope of the generalized NFW profile
+    - gam       : Inner slope of the generalized NFW profile
+    - log_r_a_1 : Logarithm of the anisotropy radius for population 1
+    - two_to_beta0_1 : 2 raised to the power of the central anisotropy for population 1
+    - two_to_betainf_1 : 2 raised to the power of the outer anisotropy for population 1
+    - rh_1       : Plummer scale radius for population 1
+    - log_r_a_2 : Logarithm of the anisotropy radius for population 2
+    - two_to_beta0_2 : 2 raised to the power of the central anisotropy for population 2
+    - two_to_betainf_2 : 2 raised to the power of the outer anisotropy for population 2
+    - rh_2       : Plummer scale radius for population 2
+    - w1         : Mixture weight for population 1 (0 < w1 < 1)
+    - vsys_los   : Systematic velocity offset for line-of-sight velocities
+    - vsys_pmR   : Systematic velocity offset for radial proper motions
+    - vsys_pmT   : Systematic velocity offset for tangential proper motions
+
     """
     def __init__(self, theta, min_radius=1e-3, max_radius=5, n_radius=200):
         """
