@@ -20,7 +20,7 @@ DEFAULT_META_URL = (
     "https://raw.githubusercontent.com/apace7/local_volume_database/refs/heads/"
     "main/data/dwarf_mw.csv"
 )
-ALL_LOADERS = ('desi', 'walker23', 'bootes1_ting', 'mock', 'deimos')
+ALL_LOADERS = ('desi', 'walker23', 'bootes1_ting', 'deimos', 'mock_cartesian', 'mock_icrs')
 
 @dataclass
 class KinematicData:
@@ -55,6 +55,24 @@ class DwarfMeta:
     log_mass_wolf_em: Optional[Quantity] = None
     log_mass_wolf_ep: Optional[Quantity] = None
 
+def load_meta_table(
+    meta_path: str = DEFAULT_META_URL
+):
+    """
+    Load the entire metadata table from CSV file or URL.
+
+    Parameters
+    ----------
+    meta_path : str
+        Path to the metadata CSV file or URL.
+        Supports local files and URLs (e.g., GitHub raw links).
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing the metadata for all dwarf galaxies.
+    """
+    return pd.read_csv(meta_path)
 
 def load_meta(
     target_key,
@@ -120,40 +138,12 @@ def _load_desi(
     vlos_err = data_cut['VRAD_ERR'].values
     mem_prob = data_cut['prob'].values
 
-    # remove all NaN and apply vlos_abs_max cut
-    mask = ~np.isnan(vlos_raw) & ~np.isnan(vlos_err)
-    if vlos_abs_max is not None:
-        vlos_raw_nosys = vlos_raw - meta.vlos_systemic.to_value(auni.km / auni.s)
-        mask &= (np.abs(vlos_raw_nosys) < vlos_abs_max)
-    ra = ra[mask]
-    dec = dec[mask]
-    vlos_raw = vlos_raw[mask]
-    vlos_err = vlos_err[mask]
-    mem_prob = mem_prob[mask]
-
-    if apply_perspective_corr:
-        # calculate full correction
-        _, _, dvr_corr = data_utils.calc_perspective_rotation_corr(
-            ra, dec,
-            meta.ra.to_value(auni.deg),
-            meta.dec.to_value(auni.deg),
-            meta.distance.to_value(auni.kpc),
-            meta.pmra.to_value(auni.mas / auni.yr),
-            meta.pmdec.to_value(auni.mas / auni.yr),
-            meta.vlos_systemic.to_value(auni.km / auni.s),
+    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj = \
+        data_utils.preprocess_kinematic_data(
+            ra, dec, vlos_raw, vlos_err, mem_prob, meta,
+            vlos_abs_max=vlos_abs_max,
+            apply_perspective_corr=apply_perspective_corr,
         )
-        vlos = vlos_raw - dvr_corr
-    else:
-        # only systemic velocity correction
-        vlos = vlos_raw - meta.vlos_systemic.to_value(auni.km / auni.s)
-
-    # Calculate projected radius
-    R_proj = data_utils.calc_projected_radius(
-        ra, dec,
-        meta.ra.to_value(auni.deg),
-        meta.dec.to_value(auni.deg),
-        meta.distance.to_value(auni.kpc),
-    )
 
     return KinematicData(
         ra=ra * auni.deg,
@@ -178,6 +168,8 @@ def _load_walker23(
     """Load kinematic data from Walker+23 catalog."""
     data = pd.read_csv(catalog_path)
     select = (data['target_system'] == target_system) & (data['prob'] > mem_prob_min)
+    if np.sum(select) == 0:
+        raise ValueError(f"No stars selected for target_system={target_system} with mem_prob_min={mem_prob_min}")
     data_cut = data[select]
 
     ra = data_cut['ra'].values
@@ -186,40 +178,12 @@ def _load_walker23(
     vlos_err = data_cut['vlos_mean_error'].values
     mem_prob = data_cut['prob'].values
 
-    # remove all NaN and apply vlos_abs_max cut
-    mask = ~np.isnan(vlos_raw) & ~np.isnan(vlos_err)
-    if vlos_abs_max is not None:
-        vlos_raw_nosys = vlos_raw - meta.vlos_systemic.to_value(auni.km / auni.s)
-        mask &= (np.abs(vlos_raw_nosys) < vlos_abs_max)
-    ra = ra[mask]
-    dec = dec[mask]
-    vlos_raw = vlos_raw[mask]
-    vlos_err = vlos_err[mask]
-    mem_prob = mem_prob[mask]
-
-    if apply_perspective_corr:
-        # calculate full correction
-        _, _, dvr_corr = data_utils.calc_perspective_rotation_corr(
-            ra, dec,
-            meta.ra.to_value(auni.deg),
-            meta.dec.to_value(auni.deg),
-            meta.distance.to_value(auni.kpc),
-            meta.pmra.to_value(auni.mas / auni.yr),
-            meta.pmdec.to_value(auni.mas / auni.yr),
-            meta.vlos_systemic.to_value(auni.km / auni.s),
+    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj = \
+        data_utils.preprocess_kinematic_data(
+            ra, dec, vlos_raw, vlos_err, mem_prob, meta,
+            vlos_abs_max=vlos_abs_max,
+            apply_perspective_corr=apply_perspective_corr,
         )
-        vlos = vlos_raw - dvr_corr
-    else:
-        # only systemic velocity correction
-        vlos = vlos_raw - meta.vlos_systemic.to_value(auni.km / auni.s)
-
-    # Calculate projected radius
-    R_proj = data_utils.calc_projected_radius(
-        ra, dec,
-        meta.ra.to_value(auni.deg),
-        meta.dec.to_value(auni.deg),
-        meta.distance.to_value(auni.kpc),
-    )
 
     return KinematicData(
         ra=ra * auni.deg,
@@ -260,43 +224,14 @@ def _load_bootes1_ting(
     vlos_raw = data_cut['vel_' + instrument].values
     vlos_err = data_cut['vel_err_' + instrument].values
 
-    # remove all NaN and apply vlos_abs_max cut
-    mask = ~np.isnan(vlos_raw) & ~np.isnan(vlos_err)
-    if remove_binaries:
-        mask &= ~data_cut['binary'].values
-
-    if vlos_abs_max is not None:
-        vlos_raw_nosys = vlos_raw - meta.vlos_systemic.to_value(auni.km / auni.s)
-        mask &= (np.abs(vlos_raw_nosys) < vlos_abs_max)
-    ra = ra[mask]
-    dec = dec[mask]
-    vlos_raw = vlos_raw[mask]
-    vlos_err = vlos_err[mask]
-    mem_prob = mem_prob[mask]
-
-    if apply_perspective_corr:
-        # calculate full correction
-        _, _, dvr_corr = data_utils.calc_perspective_rotation_corr(
-            ra, dec,
-            meta.ra.to_value(auni.deg),
-            meta.dec.to_value(auni.deg),
-            meta.distance.to_value(auni.kpc),
-            meta.pmra.to_value(auni.mas / auni.yr),
-            meta.pmdec.to_value(auni.mas / auni.yr),
-            meta.vlos_systemic.to_value(auni.km / auni.s),
+    extra_mask = ~data_cut['binary'].values if remove_binaries else None
+    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj = \
+        data_utils.preprocess_kinematic_data(
+            ra, dec, vlos_raw, vlos_err, mem_prob, meta,
+            vlos_abs_max=vlos_abs_max,
+            apply_perspective_corr=apply_perspective_corr,
+            extra_mask=extra_mask,
         )
-        vlos = vlos_raw - dvr_corr
-    else:
-        # only systemic velocity correction
-        vlos = vlos_raw - meta.vlos_systemic.to_value(auni.km / auni.s)
-
-    # Calculate projected radius
-    R_proj = data_utils.calc_projected_radius(
-        ra, dec,
-        meta.ra.to_value(auni.deg),
-        meta.dec.to_value(auni.deg),
-        meta.distance.to_value(auni.kpc),
-    )
 
     return KinematicData(
         ra=ra * auni.deg,
@@ -309,7 +244,46 @@ def _load_bootes1_ting(
         source='bootes1_ting_' + instrument
     )
 
-def _load_mock(
+def _load_deimos(
+    catalog_path: str,
+    meta: DwarfMeta,
+    mem_prob_min: float = 0.8,
+    target_system: str = '',
+    vlos_abs_max: Optional[float] = None,
+    apply_perspective_corr: bool = True,
+) -> KinematicData:
+    """Load kinematic data from DEIMOS catlaog."""
+    data = pd.read_csv(catalog_path)
+    select = (data['key'] == target_system) & (data['mem_prob'] > mem_prob_min)
+    data_cut = data[select]
+
+    ra = data_cut['RA'].values
+    dec = data_cut['DEC'].values
+    vlos_raw = data_cut['vr'].values
+    vlos_err = data_cut['vr_err'].values
+    mem_prob = data_cut['mem_prob'].values
+    R_proj = data_cut['R_kin'].values
+
+    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj = \
+        data_utils.preprocess_kinematic_data(
+            ra, dec, vlos_raw, vlos_err, mem_prob, meta,
+            vlos_abs_max=vlos_abs_max,
+            apply_perspective_corr=apply_perspective_corr,
+            R_proj_catalog=R_proj,
+        )
+
+    return KinematicData(
+        ra=ra * auni.deg,
+        dec=dec * auni.deg,
+        vlos=vlos * auni.km / auni.s,
+        vlos_err=vlos_err * auni.km / auni.s,
+        vlos_raw=vlos_raw * auni.km / auni.s,
+        R_proj=R_proj * auni.kpc,
+        mem_prob=mem_prob,
+        source='deimos',
+    )
+
+def _load_mock_cartesian(
     catalog_path: str,
     meta: DwarfMeta,
     projection_axis: int = 0,
@@ -362,54 +336,37 @@ def _load_mock(
         mem_prob=np.ones(len(data))
     )
 
-def _load_deimos(
+def _load_mock_icrs(
     catalog_path: str,
     meta: DwarfMeta,
-    mem_prob_min: float = 0.8,
-    target_system: str = '',
+    num_max_stars: Optional[int] = None,
+    seed: int = 42,
     vlos_abs_max: Optional[float] = None,
     apply_perspective_corr: bool = True,
 ) -> KinematicData:
-    """Load kinematic data from DEIMOS catlaog."""
+    """Load kinematic data from mock catalog in ICRS coordinates."""
     data = pd.read_csv(catalog_path)
-    select = (data['key'] == target_system) & (data['mem_prob'] > mem_prob_min)
-    print(target_system, mem_prob_min, np.sum(select))
-    data_cut = data[select]
+    ra = data['ra'].values
+    dec = data['dec'].values
+    vlos_raw = data['vlos'].values
+    vlos_err = data['vlos_err'].values
+    mem_prob = np.ones(len(data))
 
-    ra = data_cut['RA'].values
-    dec = data_cut['DEC'].values
-    vlos_raw = data_cut['vr'].values
-    vlos_err = data_cut['vr_err'].values
-    mem_prob = data_cut['mem_prob'].values
-    R_proj = data_cut['R_kin'].values
+    rng = np.random.default_rng(seed)
+    if num_max_stars is not None and len(data) > num_max_stars:
+        selected_indices = rng.choice(len(data), size=num_max_stars, replace=False)
+        ra = ra[selected_indices]
+        dec = dec[selected_indices]
+        vlos_raw = vlos_raw[selected_indices]
+        vlos_err = vlos_err[selected_indices]
+        mem_prob = mem_prob[selected_indices]
 
-    # remove all NaN and apply vlos_abs_max cut
-    mask = ~np.isnan(vlos_raw) & ~np.isnan(vlos_err)
-    if vlos_abs_max is not None:
-        vlos_raw_nosys = vlos_raw - meta.vlos_systemic.to_value(auni.km / auni.s)
-        mask &= (np.abs(vlos_raw_nosys) < vlos_abs_max)
-    ra = ra[mask]
-    dec = dec[mask]
-    vlos_raw = vlos_raw[mask]
-    vlos_err = vlos_err[mask]
-    mem_prob = mem_prob[mask]
-    R_proj = R_proj[mask]
-
-    if apply_perspective_corr:
-        # calculate full correction
-        _, _, dvr_corr = data_utils.calc_perspective_rotation_corr(
-            ra, dec,
-            meta.ra.to_value(auni.deg),
-            meta.dec.to_value(auni.deg),
-            meta.distance.to_value(auni.kpc),
-            meta.pmra.to_value(auni.mas / auni.yr),
-            meta.pmdec.to_value(auni.mas / auni.yr),
-            meta.vlos_systemic.to_value(auni.km / auni.s),
+    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj = \
+        data_utils.preprocess_kinematic_data(
+            ra, dec, vlos_raw, vlos_err, mem_prob, meta,
+            vlos_abs_max=vlos_abs_max,
+            apply_perspective_corr=apply_perspective_corr,
         )
-        vlos = vlos_raw - dvr_corr
-    else:
-        # only systemic velocity correction
-        vlos = vlos_raw - meta.vlos_systemic.to_value(auni.km / auni.s)
 
     return KinematicData(
         ra=ra * auni.deg,
@@ -418,8 +375,8 @@ def _load_deimos(
         vlos_err=vlos_err * auni.km / auni.s,
         vlos_raw=vlos_raw * auni.km / auni.s,
         R_proj=R_proj * auni.kpc,
+        source='mock_icrs',
         mem_prob=mem_prob,
-        source='deimos',
     )
 
 def load_kinematic_data(
@@ -452,13 +409,14 @@ def load_kinematic_data(
         Container with kinematic data for member stars.
     """
     if source not in ALL_LOADERS:
-        raise ValueError(f"Unknown source: {source}")
+        raise ValueError(f"Unknown source: {source}. Available sources: {ALL_LOADERS}")
     LOADERS = {
         'desi': _load_desi,
         'walker23': _load_walker23,
         'bootes1_ting': _load_bootes1_ting,
-        'mock': _load_mock,
         'deimos': _load_deimos,
+        'mock_cartesian': _load_mock_cartesian,
+        'mock_icrs': _load_mock_icrs,
     }
     loader = LOADERS[source]
     return loader(catalog_path, meta, **kwargs)

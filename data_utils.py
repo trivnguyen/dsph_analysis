@@ -381,16 +381,16 @@ def calc_perspective_rotation_corr(
 
     Arguments
     ---------
-    ra0, dec0: float
-        RA and DEC of the center of the system in degrees.
-    dist0: float
-        Distance to the center of the system in kpc.
-    pmra0, pmdec0: float
-        Proper motion of the center of the system in mas/yr in heliocentric frame.
-    vrad0: float
-        Radial velocity of the center of the system in km/s in heliocentric frame.
-    ras, decs: array-like
-        RA and DEC of the stars in degrees.
+    ra, dec: array-like
+        Right ascension and declination of stars in degrees.
+    ra_center, dec_center: float
+        Right ascension and declination of the galaxy center in degrees.
+    dist_center: float
+        Distance to the galaxy center in kpc.
+    pmra_center, pmdec_center: float
+        Proper motion of the galaxy center in mas/yr.
+    vrad_center: float
+        Radial velocity of the galaxy center in km/s.
 
     Returns
     -------
@@ -471,3 +471,77 @@ def calc_projected_radius(
     theta = np.sqrt(delta_ra**2 * np.cos(dec_center_rad) ** 2 + delta_dec**2)
     return dist_center * theta
 
+
+def preprocess_kinematic_data(
+    ra, dec, vlos_raw, vlos_err, mem_prob,
+    meta,
+    vlos_abs_max=None,
+    apply_perspective_corr=True,
+    extra_mask=None,
+):
+    """
+    Apply common preprocessing to raw kinematic data arrays.
+
+    Applies NaN masking, optional velocity cut, perspective (or systemic)
+    velocity correction, and computes projected radius.
+
+    Parameters
+    ----------
+    ra, dec : ndarray
+        Sky coordinates in degrees.
+    vlos_raw, vlos_err : ndarray
+        Raw line-of-sight velocities and errors in km/s.
+    mem_prob : ndarray
+        Membership probabilities.
+    meta : DwarfMeta
+        Dwarf galaxy metadata.
+    vlos_abs_max : float, optional
+        Maximum |vlos - v_sys| in km/s. Stars beyond this are removed.
+    apply_perspective_corr : bool
+        If True, apply full perspective rotation correction; otherwise only
+        subtract systemic velocity.
+    extra_mask : ndarray of bool, optional
+        Additional boolean mask ANDed with the NaN mask before cuts.
+    Returns
+    -------
+    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj : ndarray
+        Masked and processed arrays. All velocities in km/s, R_proj in kpc.
+    """
+    # remove all NaN and apply optional extra mask
+    mask = ~np.isnan(vlos_raw) & ~np.isnan(vlos_err)
+    if extra_mask is not None:
+        mask &= extra_mask
+
+    # apply vlos_abs_max cut
+    if vlos_abs_max is not None:
+        vlos_raw_nosys = vlos_raw - meta.vlos_systemic.to_value(auni.km / auni.s)
+        mask &= (np.abs(vlos_raw_nosys) < vlos_abs_max)
+
+    ra = ra[mask]
+    dec = dec[mask]
+    vlos_raw = vlos_raw[mask]
+    vlos_err = vlos_err[mask]
+    mem_prob = mem_prob[mask]
+
+    if apply_perspective_corr:
+        _, _, dvr_corr = calc_perspective_rotation_corr(
+            ra, dec,
+            meta.ra.to_value(auni.deg),
+            meta.dec.to_value(auni.deg),
+            meta.distance.to_value(auni.kpc),
+            meta.pmra.to_value(auni.mas / auni.yr),
+            meta.pmdec.to_value(auni.mas / auni.yr),
+            meta.vlos_systemic.to_value(auni.km / auni.s),
+        )
+        vlos = vlos_raw - dvr_corr
+    else:
+        vlos = vlos_raw - meta.vlos_systemic.to_value(auni.km / auni.s)
+
+    R_proj = calc_projected_radius(
+        ra, dec,
+        meta.ra.to_value(auni.deg),
+        meta.dec.to_value(auni.deg),
+        meta.distance.to_value(auni.kpc),
+    )
+
+    return ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj
