@@ -1,5 +1,7 @@
 """Data processing utilities for dwarf spheroidal analysis."""
 
+from typing import Tuple, Optional
+
 import numpy as np
 from numpy.typing import NDArray
 import scipy.stats
@@ -12,7 +14,7 @@ from .coord_utils import rotation_matrix_from_vectors, cartesian_to_spherical
 def poisson_confidence_interval(
     n: NDArray[np.integer],
     alpha: float = 0.32
-) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+) -> Tuple[NDArray[np.floating], NDArray[np.floating]]:
     """
     Compute Poisson confidence interval for count data.
 
@@ -43,8 +45,8 @@ def calc_projected_nstar_binned(
     R: NDArray[np.floating],
     alpha: float = 0.32,
     return_bounds: bool = False,
-    nbins: int | None = None
-) -> tuple:
+    nbins: Optional[int] = None
+) -> Tuple:
     """
     Calculate projected number of stars as a function of projected radius.
 
@@ -99,8 +101,8 @@ def calc_Sigma_star_binned(
     R: NDArray[np.floating],
     alpha: float = 0.32,
     return_bounds: bool = False,
-    nbins: int | None = None
-) -> tuple:
+    nbins: Optional[int] = None
+) -> Tuple:
     """
     Calculate projected 2D surface density profile from star positions.
 
@@ -150,11 +152,11 @@ def calc_Sigma_star_binned(
 def calc_rho_binned(
     r: NDArray[np.floating],
     mass: NDArray[np.floating],
-    r_min: float | None = None,
-    r_max: float | None = None,
-    num_bins: int | None = None,
+    r_min: Optional[float] = None,
+    r_max: Optional[float] = None,
+    num_bins: Optional[int] = None,
     return_count: bool = False
-) -> tuple:
+) -> Tuple:
     """
     Calculate 3D density profile from particle data.
 
@@ -207,10 +209,10 @@ def calc_rho_binned(
 def calc_mass_enclosed_binned(
     r: NDArray[np.floating],
     mass: NDArray[np.floating],
-    r_min: float | None = None,
-    r_max: float | None = None,
-    num_bins: int | None = None
-) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+    r_min: Optional[float] = None,
+    r_max: Optional[float] = None,
+    num_bins: Optional[int] = None
+) -> Tuple[NDArray[np.floating], NDArray[np.floating]]:
     """
     Calculate enclosed mass profile from particle data.
 
@@ -250,10 +252,10 @@ def calc_sigma_spherical(
     pos: NDArray[np.floating],
     vel: NDArray[np.floating],
     mass: NDArray[np.floating],
-    r_min: float | None = None,
-    r_max: float | None = None,
-    num_bins: int | None = None
-) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+    r_min: Optional[float] = None,
+    r_max: Optional[float] = None,
+    num_bins: Optional[int] = None
+) -> Tuple[NDArray[np.floating], NDArray[np.floating]]:
     """
     Calculate velocity dispersion in spherical coordinates from particle data.
 
@@ -372,7 +374,7 @@ def calc_perspective_rotation_corr(
     pmra_center: float,
     pmdec_center: float,
     vrad_center: float,
-) -> tuple[NDArray[np.floating], NDArray[np.floating], NDArray[np.floating]]:
+) -> Tuple[NDArray[np.floating], NDArray[np.floating], NDArray[np.floating]]:
     """
     Calculate the correction to the expected proper motion and radial velocity
     due to perspective rotation effect.

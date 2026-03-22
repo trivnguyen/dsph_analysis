@@ -1,5 +1,7 @@
 """Coordinate transformation utilities."""
 
+from typing import Tuple
+
 import numpy as np
 from numpy.typing import NDArray
 import astropy.units as u
@@ -37,7 +39,7 @@ def rotation_matrix_from_vectors(
 def cartesian_to_spherical(
     pos: u.Quantity,
     vel: u.Quantity
-) -> tuple[u.Quantity, u.Quantity, u.Quantity, u.Quantity, u.Quantity, u.Quantity]:
+) -> Tuple[u.Quantity, u.Quantity, u.Quantity, u.Quantity, u.Quantity, u.Quantity]:
     """
     Convert Cartesian coordinates and velocities to spherical.
 

@@ -95,6 +95,9 @@ def load_meta(
         Metadata container for the dwarf galaxy.
     """
     meta_df = pd.read_csv(meta_path)
+    # check if target_key exists in meta_df
+    if target_key not in meta_df['key'].values:
+        raise ValueError(f"target_key '{target_key}' not found in metadata table.")
     row = meta_df[meta_df['key'] == target_key].iloc[0]
 
     return DwarfMeta(
