@@ -4,6 +4,10 @@ import scipy.special as sc
 from scipy import constants
 from scipy.interpolate import interp1d
 from scipy.integrate import quad
+from scipy.optimize import brentq
+
+import astropy.units as auni
+import astropy.cosmology as acosm
 
 _TO_KM2_S2 = 1.989e12 / 3.0856  # G unit conversion: (10^7 M_sun, kpc) -> km^2/s^2
 
@@ -82,6 +86,42 @@ class GeneralizedOMJeans:
         c1 = (4 * np.pi * self.rho_s * self.r_s**3) / (3.0 - self.gam)
         c2 = r_n ** (3.0 - self.gam)
         return c1 * c2 * sc.hyp2f1(a1, a2, a3, a4)
+
+    def rho_bar(self, r):
+        """ Mean enclosed density within radius r."""
+        return self.M(r) / (4/3 * np.pi * r**3)
+
+    def r200(self, rho_crit=None, r_min=None, r_max=50):
+        """Compute r200 where the mean enclosed density equals 200 * rho_crit.
+
+        For profiles with gamma < 0, rho_bar(r) is non-monotone at small r.
+        The search is therefore restricted to r > r_s to avoid the inner region.
+        """
+        if rho_crit is None:
+            rho_crit = acosm.Planck18.critical_density0.to(
+                auni.Msun / auni.kpc**3
+            ).value
+
+        target = 200.0 * rho_crit
+        r_min = self.r_s if r_min is None else r_min
+
+        if self.rho_bar(r_min) < target:
+            raise ValueError(
+                f"rho_bar(r_min={r_min:.3e}) < target at r_min. "
+                f"r200 may be smaller than r_s or the profile is too diffuse."
+            )
+        if self.rho_bar(r_max) > target:
+            raise ValueError(
+                f"rho_bar(r_max={r_max:.3e}) > target. "
+                f"Increase r_max to bracket r200."
+            )
+
+        return brentq(lambda r: self.rho_bar(r) - target, r_min, r_max)
+
+    def M200(self, rho_crit=None, r_min=None, r_max=50):
+        """Compute M200 = M(r200)."""
+        r200 = self.r200(rho_crit=rho_crit, r_min=r_min, r_max=r_max)
+        return self.M(r200).item()
 
     def nu(self, r):
         """3D stellar density profile (Plummer)."""
