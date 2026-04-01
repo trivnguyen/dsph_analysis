@@ -149,7 +149,7 @@ def fit_vdisp_los(
     sampler = emcee.EnsembleSampler(
         nwalkers, ndim, log_posterior, args=[(vr, vr_err)]
     )
-    sampler.run_mcmc(p0, nsteps, progress=True)
+    sampler.run_mcmc(p0, nsteps, progress=verbose)
 
     # Check convergence with autocorrelation time
     total_steps = nsteps
@@ -291,9 +291,10 @@ def calc_vdisp_los_binned(
         vr_err_bin = vlos_err[bin_mask]
         R_bin = R_proj[bin_mask]
 
-        R_mid.append(np.median(R_bin))
+        # R_mid.append(np.median(R_bin))
         R_lo.append(R_bin.min())
         R_hi.append(R_bin.max())
+        R_mid.append(0.5 * (R_lo[-1] + R_hi[-1]))
 
         samples = fit_vdisp_los(vr_bin, vr_err_bin, nsteps=nsteps, verbose=verbose,
                                 auto_extend=auto_extend, max_steps=max_steps)
