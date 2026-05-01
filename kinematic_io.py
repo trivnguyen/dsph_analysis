@@ -129,6 +129,7 @@ def _load_desi(
     meta: DwarfMeta,
     mem_prob_min: float = 0.8,
     vlos_abs_max: Optional[float] = None,
+    vlos_err_floor: float = 0.9,
     apply_perspective_corr: bool = True,
 ) -> KinematicData:
     """Load kinematic data from DESI catalog."""
@@ -139,6 +140,7 @@ def _load_desi(
     dec = data_cut['DEC'].values
     vlos_raw = data_cut['VRAD'].values
     vlos_err = data_cut['VRAD_ERR'].values
+    vlos_err = np.sqrt(vlos_err**2 + vlos_err_floor**2)  # add error floor in quadrature
     mem_prob = data_cut['prob'].values
 
     ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj = \
@@ -227,7 +229,14 @@ def _load_bootes1_ting(
     vlos_raw = data_cut['vel_' + instrument].values
     vlos_err = data_cut['vel_err_' + instrument].values
 
-    extra_mask = ~data_cut['binary'].values if remove_binaries else None
+    if remove_binaries:
+        if instrument != 'avg':
+            extra_mask = data_cut['vel_q_' + instrument].values.astype(bool)
+        else:
+            extra_mask = ~data_cut['binary'].values.astype(bool)
+    else:
+        extra_mask = None
+
     ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj = \
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
@@ -345,6 +354,7 @@ def _load_mock_icrs(
     num_max_stars: Optional[int] = None,
     seed: int = 42,
     vlos_abs_max: Optional[float] = None,
+    vlos_err_floor: float = 0.0,
     apply_perspective_corr: bool = True,
 ) -> KinematicData:
     """Load kinematic data from mock catalog in ICRS coordinates."""
@@ -354,6 +364,8 @@ def _load_mock_icrs(
     vlos_raw = data['vlos'].values
     vlos_err = data['vlos_err'].values
     mem_prob = np.ones(len(data))
+
+    vlos_err = np.sqrt(vlos_err**2 + vlos_err_floor**2)
 
     rng = np.random.default_rng(seed)
     if num_max_stars is not None and len(data) > num_max_stars:
