@@ -76,6 +76,11 @@ class GeneralizedOMJeans:
         c2 = (1 + (r / self.r_s)**(self.alp))**(-(self.bet - self.gam)/self.alp)
         return c1 * c2
 
+    def rho_log_slope(self, r):
+        """ Logarithmic slope of the dark matter density profile at radius r."""
+        x_alpha = (r / self.r_s)**self.alp
+        return -self.gam - (self.bet - self.gam) * x_alpha / (1 + x_alpha)
+
     def M(self, r):
         """Enclosed dark matter mass profile for the generalized NFW profile."""
         r_n = r / self.r_s
@@ -86,42 +91,6 @@ class GeneralizedOMJeans:
         c1 = (4 * np.pi * self.rho_s * self.r_s**3) / (3.0 - self.gam)
         c2 = r_n ** (3.0 - self.gam)
         return c1 * c2 * sc.hyp2f1(a1, a2, a3, a4)
-
-    def rho_bar(self, r):
-        """ Mean enclosed density within radius r."""
-        return self.M(r) / (4/3 * np.pi * r**3)
-
-    def r200(self, rho_crit=None, r_min=None, r_max=50):
-        """Compute r200 where the mean enclosed density equals 200 * rho_crit.
-
-        For profiles with gamma < 0, rho_bar(r) is non-monotone at small r.
-        The search is therefore restricted to r > r_s to avoid the inner region.
-        """
-        if rho_crit is None:
-            rho_crit = acosm.Planck18.critical_density0.to(
-                auni.Msun / auni.kpc**3
-            ).value
-
-        target = 200.0 * rho_crit
-        r_min = self.r_s if r_min is None else r_min
-
-        if self.rho_bar(r_min) < target:
-            raise ValueError(
-                f"rho_bar(r_min={r_min:.3e}) < target at r_min. "
-                f"r200 may be smaller than r_s or the profile is too diffuse."
-            )
-        if self.rho_bar(r_max) > target:
-            raise ValueError(
-                f"rho_bar(r_max={r_max:.3e}) > target. "
-                f"Increase r_max to bracket r200."
-            )
-
-        return brentq(lambda r: self.rho_bar(r) - target, r_min, r_max)
-
-    def M200(self, rho_crit=None, r_min=None, r_max=50):
-        """Compute M200 = M(r200)."""
-        r200 = self.r200(rho_crit=rho_crit, r_min=r_min, r_max=r_max)
-        return self.M(r200).item()
 
     def nu(self, r):
         """3D stellar density profile (Plummer)."""
@@ -153,6 +122,28 @@ class GeneralizedOMJeans:
         """
         return r**(2 * self.beta0) * (1 + r**2 / self.r_a**2)**(self.betainf - self.beta0)
 
+    def beta_prime(self, r):
+        """4th-order anisotropy analog beta'(r), using the same generalized OM form.
+        This is used for the higher-order Jeans equations. Assume to be the same
+        functional form with beta(r).
+        """
+        return self.beta(r)
+
+    def gbeta_prime(self, r):
+        """Integrating factor g'(r) for the 4th-order Jeans equations, using the same generalized OM form.
+        Assume to be the same functional form with beta(r).
+        """
+        return self.gbeta(r)
+
+    def dbeta_dr(self, r):
+        """ Derivative of the anisotropy parameter beta with respect to radius r."""
+        return 2 * (self.betainf - self.beta0) * self.r_a**2 * r / (r**2 + self.r_a**2)**2
+
+    def dbeta_prime_dr(self, r):
+        """ Derivative of the 4th-order anisotropy parameter beta' with respect to radius r."""
+        return self.dbeta_dr(r)
+
+    ### Jeans modeling methods to compute velocity dispersion profiles ###
     def _sigma2_r(self, r):
         """Radial velocity dispersion squared at radius r."""
         def integrand(s):
@@ -216,6 +207,94 @@ class GeneralizedOMJeans:
         """Compute the tangential proper motion velocity dispersion profile."""
         sigma2_r_fn = self.sigma2_grid_fn(self.r_grid)
         return np.array([self._sigma2_pmT_R(R, sigma2_r_fn) for R in r])
+
+    ### Higher-order moments code """
+    def _F_los(self, r, R):
+        """ Higher-order Jeans term F_los(r, R) for the line-of-sight velocity dispersion.
+        Eq. (20) in Bañares-Hernández, Read, and Júlio 2025 but without the <v_r^4> term, which is computed separately.
+        """
+        a1 = 1 - 2 * self.beta_prime(r) * R**2 / r**2
+        a2 = 0.5 * self.beta_prime(r) * (1 + self.beta_prime(r)) * R**4 / r**4
+        a3 = -0.25 * self.dbeta_prime_dr(r) * R**4 / r**3
+        return a1 + a2 + a3
+
+    def _sigma4_r(self, r, sigma2_r_fn):
+        def integrand(s):
+            return sigma2_r_fn(s) * constants.G * self.M(s) / s**2 * self.nu(s) * self.gbeta_prime(s)
+
+        c1 = 3.0 / (self.nu(r) * self.gbeta_prime(r))
+        integral, _ = quad(integrand, r, np.inf, epsabs=1, epsrel=1)
+        return c1 * integral * _TO_KM2_S2
+
+    def _sigma4_los_R(self, R, sigma4_r_fn):
+        """Line-of-sight velocity dispersion squared at projected radius R."""
+        def integrand(r):
+            anisotropy_term = self._F_los(r, R)
+            kernel = r / np.sqrt(r**2 - R**2)
+            return anisotropy_term * self.nu(r) * sigma4_r_fn(r) * kernel
+
+        integral, _ = quad(integrand, R, np.inf, epsabs=1, epsrel=1)
+        return 2.0 / self.I(R) * integral
+
+    def sigma4_grid_fn(self, r_grid, sigma2_r_fn):
+        return interp1d(
+            r_grid,
+            [self._sigma4_r(r, sigma2_r_fn) for r in r_grid],
+            bounds_error=False,
+            fill_value=0.0,
+            kind="linear",
+        )
+
+    def sigma4_los(self, r):
+        sigma2_r_fn = self.sigma2_grid_fn(self.r_grid)
+        sigma4_r_fn = self.sigma4_grid_fn(self.r_grid, sigma2_r_fn)
+        return np.array([self._sigma4_los_R(R, sigma4_r_fn) for R in r])
+
+    def kurtosis_los(self, r):
+        """Projected LOS kurtosis profile kappa(R) = <v^4_los>(R) / sigma^2_los(R)^2."""
+        sigma2_r_fn = self.sigma2_grid_fn(self.r_grid)
+        sigma4_r_fn = self.sigma4_grid_fn(self.r_grid, sigma2_r_fn)
+        v4 = np.array([self._sigma4_los_R(R, sigma4_r_fn) for R in r])
+        s2 = np.array([self._sigma2_los_R(R, sigma2_r_fn) for R in r])
+        return v4 / s2**2
+
+    ### Additional methods that are not directly related to the Jeans modeling but are useful for analysis ###
+    def rho_bar(self, r):
+        """ Mean enclosed density within radius r."""
+        return self.M(r) / (4/3 * np.pi * r**3)
+
+    def r200(self, rho_crit=None, r_min=None, r_max=50):
+        """Compute r200 where the mean enclosed density equals 200 * rho_crit.
+
+        For profiles with gamma < 0, rho_bar(r) is non-monotone at small r.
+        The search is therefore restricted to r > r_s to avoid the inner region.
+        """
+        if rho_crit is None:
+            rho_crit = acosm.Planck18.critical_density0.to(
+                auni.Msun / auni.kpc**3
+            ).value
+
+        target = 200.0 * rho_crit
+        # r_min = self.r_s if r_min is None else r_min
+        # r_min = 1e-3 if r_min is None else r_min
+
+        if self.rho_bar(r_min) < target:
+            raise ValueError(
+                f"rho_bar(r_min={r_min:.3e}) < target at r_min. "
+                f"r200 may be smaller than r_s or the profile is too diffuse."
+            )
+        if self.rho_bar(r_max) > target:
+            raise ValueError(
+                f"rho_bar(r_max={r_max:.3e}) > target. "
+                f"Increase r_max to bracket r200."
+            )
+
+        return brentq(lambda r: self.rho_bar(r) - target, r_min, r_max)
+
+    def M200(self, rho_crit=None, r_min=None, r_max=50):
+        """Compute M200 = M(r200)."""
+        r200 = self.r200(rho_crit=rho_crit, r_min=r_min, r_max=r_max)
+        return self.M(r200).item()
 
 
 class TwoPopGeneralizedOMJeans:

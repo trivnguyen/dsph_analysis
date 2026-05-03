@@ -2,11 +2,10 @@
 
 from typing import Tuple, Optional
 
-import astropy.coordinates as acoo
-import astropy.units as auni
 import emcee
 import numpy as np
 from numpy.typing import NDArray
+
 
 def log_gauss_1d(
     x: NDArray[np.floating], mu: float, sigma: NDArray[np.floating]
@@ -169,12 +168,12 @@ def fit_vdisp_los(
                     break
 
                 # Extend by the amount needed to reach convergence
-                steps_needed = int(convergence_factor * np.max(tau)) - total_steps
+                steps_needed = int(convergence_factor * np.nanmax(tau)) - total_steps
                 extend_steps = min(steps_needed, max_steps - total_steps)
                 extend_steps = max(extend_steps, nsteps)  # At least nsteps more
 
                 print(
-                    f"Chain not converged (n={total_steps}, tau={np.max(tau):.1f}). "
+                    f"Chain not converged (n={total_steps}, tau={np.nanmax(tau):.1f}). "
                     f"Extending by {extend_steps} steps..."
                 )
                 sampler.run_mcmc(None, extend_steps, progress=verbose)
@@ -200,14 +199,17 @@ def fit_vdisp_los(
                 tau = sampler.get_autocorr_time(quiet=True)
                 break
 
-    # Discard burn-in (at least 2-3 times max tau) and thin
-    burnin = int(3 * np.max(tau))
-    thin = max(1, int(0.5 * np.min(tau)))
+    # Discard burn-in (at least 2-3 times max tau) and thin.
+    # tau can contain NaN when estimation fails; fall back to total_steps // 4.
+    tau_max = np.nanmax(tau) if np.any(np.isfinite(tau)) else total_steps // 4
+    tau_min = np.nanmin(tau) if np.any(np.isfinite(tau)) else total_steps // 4
+    burnin = int(3 * tau_max)
+    thin = max(1, int(0.5 * tau_min))
     samples = sampler.get_chain(discard=burnin, thin=thin, flat=True)
 
     if verbose:
         print(f"Autocorrelation times: {tau}")
-        print(f"Mean tau: {np.mean(tau):.1f} steps (total chain: {total_steps} steps)")
+        print(f"Mean tau: {np.nanmean(tau):.1f} steps (total chain: {total_steps} steps)")
         print(f"Discarded {burnin} steps, thinned by {thin}")
         print(f"Final sample size: {samples.shape[0]}")
 
