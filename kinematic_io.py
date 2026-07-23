@@ -143,7 +143,7 @@ def _load_desi(
     vlos_err = np.sqrt(vlos_err**2 + vlos_err_floor**2)  # add error floor in quadrature
     mem_prob = data_cut['prob'].values
 
-    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj = \
+    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj, mask = \
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,
@@ -183,7 +183,7 @@ def _load_walker23(
     vlos_err = data_cut['vlos_mean_error'].values
     mem_prob = data_cut['prob'].values
 
-    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj = \
+    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj, mask = \
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,
@@ -208,6 +208,7 @@ def _load_bootes1_ting(
     instrument='mmt',
     vlos_abs_max: Optional[float] = None,
     apply_perspective_corr: bool = True,
+    use_sandford_perspective_corr: bool = False,
     remove_binaries: bool = True,
 ) -> KinematicData:
     """Load kinematic data from Boo I Ting catalog."""
@@ -237,13 +238,26 @@ def _load_bootes1_ting(
     else:
         extra_mask = None
 
-    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj = \
-        data_utils.preprocess_kinematic_data(
-            ra, dec, vlos_raw, vlos_err, mem_prob, meta,
-            vlos_abs_max=vlos_abs_max,
-            apply_perspective_corr=apply_perspective_corr,
-            extra_mask=extra_mask,
-        )
+    if not use_sandford_perspective_corr:
+        ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj, mask = \
+            data_utils.preprocess_kinematic_data(
+                ra, dec, vlos_raw, vlos_err, mem_prob, meta,
+                vlos_abs_max=vlos_abs_max,
+                apply_perspective_corr=apply_perspective_corr,
+                extra_mask=extra_mask,
+            )
+    else:
+        ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj, mask = \
+            data_utils.preprocess_kinematic_data(
+                ra, dec, vlos_raw, vlos_err, mem_prob, meta,
+                vlos_abs_max=vlos_abs_max,
+                apply_perspective_corr=False,
+                extra_mask=extra_mask,
+            )
+        vcorr = data_cut['vel_persp_rot'].values
+        if extra_mask is not None:
+            vcorr = vcorr[mask]
+        vlos -= vcorr
 
     return KinematicData(
         ra=ra * auni.deg,
@@ -276,7 +290,7 @@ def _load_deimos(
     mem_prob = data_cut['mem_prob'].values
     R_proj = data_cut['R_kin'].values
 
-    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj = \
+    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj, mask = \
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,
@@ -376,7 +390,7 @@ def _load_mock_icrs(
         vlos_err = vlos_err[selected_indices]
         mem_prob = mem_prob[selected_indices]
 
-    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj = \
+    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj, _ = \
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,

@@ -36,6 +36,8 @@ class GeneralizedOMJeans:
     - vsys_pmT   : Systematic velocity offset for tangential proper motions
 
     """
+    _QUAD_EXACT_KW = dict(epsabs=1, epsrel=1, limit=200)
+
     def __init__(self, theta, min_rgrid=1e-3, max_rgrid=50, n_grid=500):
         """
         Args:
@@ -256,6 +258,82 @@ class GeneralizedOMJeans:
         sigma4_r_fn = self.sigma4_grid_fn(self.r_grid, sigma2_r_fn)
         v4 = np.array([self._sigma4_los_R(R, sigma4_r_fn) for R in r])
         s2 = np.array([self._sigma2_los_R(R, sigma2_r_fn) for R in r])
+        return v4 / s2**2
+
+    ### High-precision "exact" variants (slow, no interpolation, tight quad tolerances) ###
+    def _sigma2_r_exact(self, r):
+        """Radial velocity dispersion squared at r (no interpolation)."""
+        def integrand(s):
+            return constants.G * self.M(s) / s**2 * self.nu(s) * self.gbeta(s)
+
+        c1 = 1.0 / (self.nu(r) * self.gbeta(r))
+        integral, _ = quad(integrand, r, np.inf, **self._QUAD_EXACT_KW)
+        return c1 * integral * _TO_KM2_S2
+
+    def _sigma4_r_exact(self, r):
+        """4th-order radial moment at r (no interpolation)."""
+        def integrand(s):
+            return self._sigma2_r_exact(s) * constants.G * self.M(s) / s**2 * self.nu(s) * self.gbeta_prime(s)
+
+        c1 = 3.0 / (self.nu(r) * self.gbeta_prime(r))
+        integral, _ = quad(integrand, r, np.inf, **self._QUAD_EXACT_KW)
+        return c1 * integral * _TO_KM2_S2
+
+    def sigma2_los_exact(self, r):
+        """Line-of-sight velocity dispersion profile (high-precision, slow)."""
+        result = np.empty(len(r))
+        for i, R in enumerate(r):
+            def integrand(s, R=R):
+                anisotropy_term = 1 - self.beta(s) * (R / s)**2
+                kernel = s / np.sqrt(s**2 - R**2)
+                return anisotropy_term * self.nu(s) * self._sigma2_r_exact(s) * kernel
+
+            integral, _ = quad(integrand, R, np.inf, **self._QUAD_EXACT_KW)
+            result[i] = 2.0 / self.I(R) * integral
+        return result
+
+    def sigma2_pmR_exact(self, r):
+        """Radial proper motion velocity dispersion profile (high-precision, slow)."""
+        result = np.empty(len(r))
+        for i, R in enumerate(r):
+            def integrand(s, R=R):
+                anisotropy_term = 1 - self.beta(s) + self.beta(s) * (R / s)**2
+                kernel = s / np.sqrt(s**2 - R**2)
+                return anisotropy_term * self.nu(s) * self._sigma2_r_exact(s) * kernel
+
+            integral, _ = quad(integrand, R, np.inf, **self._QUAD_EXACT_KW)
+            result[i] = 2.0 / self.I(R) * integral
+        return result
+
+    def sigma2_pmT_exact(self, r):
+        """Tangential proper motion velocity dispersion profile (high-precision, slow)."""
+        result = np.empty(len(r))
+        for i, R in enumerate(r):
+            def integrand(s, R=R):
+                anisotropy_term = 1 - self.beta(s)
+                kernel = s / np.sqrt(s**2 - R**2)
+                return anisotropy_term * self.nu(s) * self._sigma2_r_exact(s) * kernel
+
+            integral, _ = quad(integrand, R, np.inf, **self._QUAD_EXACT_KW)
+            result[i] = 2.0 / self.I(R) * integral
+        return result
+
+    def sigma4_los_exact(self, r):
+        """Line-of-sight 4th velocity moment (high-precision, slow)."""
+        result = np.empty(len(r))
+        for i, R in enumerate(r):
+            def integrand(s, R=R):
+                kernel = s / np.sqrt(s**2 - R**2)
+                return self._F_los(s, R) * self.nu(s) * self._sigma4_r_exact(s) * kernel
+
+            integral, _ = quad(integrand, R, np.inf, **self._QUAD_EXACT_KW)
+            result[i] = 2.0 / self.I(R) * integral
+        return result
+
+    def kurtosis_los_exact(self, r):
+        """Projected LOS kurtosis profile kappa(R) = <v^4_los>(R) / sigma^2_los(R)^2 (high-precision, slow)."""
+        v4 = self.sigma4_los_exact(r)
+        s2 = self.sigma2_los_exact(r)
         return v4 / s2**2
 
     ### Additional methods that are not directly related to the Jeans modeling but are useful for analysis ###

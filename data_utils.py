@@ -515,6 +515,8 @@ def preprocess_kinematic_data(
         mask &= extra_mask
 
     # apply vlos_abs_max cut
+    # TODO: in the future, we may want to apply this cut after perspective correction instead of on the raw vlos
+    # for now, keep it here so that the cut is consistent with previous analysis
     if vlos_abs_max is not None:
         vlos_raw_nosys = vlos_raw - meta.vlos_systemic.to_value(auni.km / auni.s)
         mask &= (np.abs(vlos_raw_nosys) < vlos_abs_max)
@@ -546,4 +548,4 @@ def preprocess_kinematic_data(
         meta.distance.to_value(auni.kpc),
     )
 
-    return ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj
+    return ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj, mask
