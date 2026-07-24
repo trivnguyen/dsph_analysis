@@ -431,17 +431,20 @@ def calc_perspective_rotation_corr(
     )
 
 
-def calc_projected_radius(
+def calc_projected_xy(
     ra: NDArray[np.floating],
     dec: NDArray[np.floating],
     ra_center: float,
     dec_center: float,
     dist_center: float,
-) -> NDArray[np.floating]:
+) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
     """
-    Calculate the projected radius from the galaxy center.
+    Calculate the projected tangent-plane coordinates from the galaxy
+    center.
 
-    Uses small angle approximation to convert angular separation to physical distance.
+    Uses small angle approximation to convert angular separation to
+    physical distance. The projected radius can be recovered as
+    ``sqrt(x_proj**2 + y_proj**2)``.
 
     Parameters
     ----------
@@ -458,8 +461,10 @@ def calc_projected_radius(
 
     Returns
     -------
-    NDArray[np.floating]
-        Projected radius in kpc.
+    x_proj : NDArray[np.floating]
+        Projected coordinate along the RA direction in kpc.
+    y_proj : NDArray[np.floating]
+        Projected coordinate along the Dec direction in kpc.
     """
     ra_rad = np.deg2rad(ra)
     dec_rad = np.deg2rad(dec)
@@ -470,8 +475,9 @@ def calc_projected_radius(
     delta_dec = dec_rad - dec_center_rad
 
     # Small angle approximation
-    theta = np.sqrt(delta_ra**2 * np.cos(dec_center_rad) ** 2 + delta_dec**2)
-    return dist_center * theta
+    x_proj = dist_center * delta_ra * np.cos(dec_center_rad)
+    y_proj = dist_center * delta_dec
+    return x_proj, y_proj
 
 
 def preprocess_kinematic_data(
@@ -480,12 +486,14 @@ def preprocess_kinematic_data(
     vlos_abs_max=None,
     apply_perspective_corr=True,
     extra_mask=None,
+    R_proj_catalog=None,
 ):
     """
     Apply common preprocessing to raw kinematic data arrays.
 
     Applies NaN masking, optional velocity cut, perspective (or systemic)
-    velocity correction, and computes projected radius.
+    velocity correction, and computes projected tangent-plane coordinates
+    and radius.
 
     Parameters
     ----------
@@ -504,10 +512,16 @@ def preprocess_kinematic_data(
         subtract systemic velocity.
     extra_mask : ndarray of bool, optional
         Additional boolean mask ANDed with the NaN mask before cuts.
+    R_proj_catalog : ndarray, optional
+        Pre-computed projected radius from the catalog, in kpc. If given,
+        it is masked and used in place of the radius derived from
+        ``x_proj``/``y_proj``.
     Returns
     -------
-    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj : ndarray
-        Masked and processed arrays. All velocities in km/s, R_proj in kpc.
+    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, x_proj, y_proj, R_proj,
+    mask : ndarray
+        Masked and processed arrays. All velocities in km/s, x_proj,
+        y_proj, and R_proj in kpc.
     """
     # remove all NaN and apply optional extra mask
     mask = ~np.isnan(vlos_raw) & ~np.isnan(vlos_err)
@@ -526,6 +540,8 @@ def preprocess_kinematic_data(
     vlos_raw = vlos_raw[mask]
     vlos_err = vlos_err[mask]
     mem_prob = mem_prob[mask]
+    if R_proj_catalog is not None:
+        R_proj_catalog = R_proj_catalog[mask]
 
     if apply_perspective_corr:
         _, _, dvr_corr = calc_perspective_rotation_corr(
@@ -541,11 +557,18 @@ def preprocess_kinematic_data(
     else:
         vlos = vlos_raw - meta.vlos_systemic.to_value(auni.km / auni.s)
 
-    R_proj = calc_projected_radius(
+    x_proj, y_proj = calc_projected_xy(
         ra, dec,
         meta.ra.to_value(auni.deg),
         meta.dec.to_value(auni.deg),
         meta.distance.to_value(auni.kpc),
     )
+    if R_proj_catalog is not None:
+        R_proj = R_proj_catalog
+    else:
+        R_proj = np.sqrt(x_proj**2 + y_proj**2)
 
-    return ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj, mask
+    return (
+        ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
+        x_proj, y_proj, R_proj, mask,
+    )

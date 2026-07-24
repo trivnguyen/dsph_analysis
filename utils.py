@@ -43,7 +43,7 @@ from .data_utils import (
     calc_sigma_spherical,
     calc_systemic_velocity,
     calc_perspective_rotation_corr,
-    calc_projected_radius
+    calc_projected_xy
 )
 
 # Re-export from coord_utils
@@ -77,7 +77,7 @@ __all__ = [
     'calc_sigma_spherical',
     'calc_systemic_velocity',
     'calc_perspective_rotation_corr',
-    'calc_projected_radius',
+    'calc_projected_xy',
     # Coord utils
     'rotation_matrix_from_vectors',
     'cartesian_to_spherical',

@@ -29,6 +29,8 @@ class KinematicData:
     dec: Quantity  # deg
     vlos: Quantity  # km/s
     vlos_err: Quantity  # km/s
+    X_proj: Quantity  # kpc
+    Y_proj: Quantity  # kpc
     R_proj: Quantity  # kpc
     mem_prob: Quantity  # dimensionless
     vlos_raw: Optional[Quantity] = None  # km/s
@@ -143,12 +145,14 @@ def _load_desi(
     vlos_err = np.sqrt(vlos_err**2 + vlos_err_floor**2)  # add error floor in quadrature
     mem_prob = data_cut['prob'].values
 
-    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj, mask = \
+    (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
+     X_proj, Y_proj, R_proj, mask) = (
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,
             apply_perspective_corr=apply_perspective_corr,
         )
+    )
 
     return KinematicData(
         ra=ra * auni.deg,
@@ -156,6 +160,8 @@ def _load_desi(
         vlos=vlos * auni.km / auni.s,
         vlos_err=vlos_err * auni.km / auni.s,
         vlos_raw=vlos_raw * auni.km / auni.s,
+        X_proj=X_proj * auni.kpc,
+        Y_proj=Y_proj * auni.kpc,
         R_proj=R_proj * auni.kpc,
         mem_prob=mem_prob,
         source='desi',
@@ -183,12 +189,14 @@ def _load_walker23(
     vlos_err = data_cut['vlos_mean_error'].values
     mem_prob = data_cut['prob'].values
 
-    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj, mask = \
+    (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
+     X_proj, Y_proj, R_proj, mask) = (
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,
             apply_perspective_corr=apply_perspective_corr,
         )
+    )
 
     return KinematicData(
         ra=ra * auni.deg,
@@ -196,6 +204,8 @@ def _load_walker23(
         vlos=vlos * auni.km / auni.s,
         vlos_err=vlos_err * auni.km / auni.s,
         vlos_raw=vlos_raw * auni.km / auni.s,
+        X_proj=X_proj * auni.kpc,
+        Y_proj=Y_proj * auni.kpc,
         R_proj=R_proj * auni.kpc,
         mem_prob=mem_prob,
         source='walker23',
@@ -239,21 +249,25 @@ def _load_bootes1_ting(
         extra_mask = None
 
     if not use_sandford_perspective_corr:
-        ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj, mask = \
+        (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
+         X_proj, Y_proj, R_proj, mask) = (
             data_utils.preprocess_kinematic_data(
                 ra, dec, vlos_raw, vlos_err, mem_prob, meta,
                 vlos_abs_max=vlos_abs_max,
                 apply_perspective_corr=apply_perspective_corr,
                 extra_mask=extra_mask,
             )
+        )
     else:
-        ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj, mask = \
+        (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
+         X_proj, Y_proj, R_proj, mask) = (
             data_utils.preprocess_kinematic_data(
                 ra, dec, vlos_raw, vlos_err, mem_prob, meta,
                 vlos_abs_max=vlos_abs_max,
                 apply_perspective_corr=False,
                 extra_mask=extra_mask,
             )
+        )
         vcorr = data_cut['vel_persp_rot'].values
         if extra_mask is not None:
             vcorr = vcorr[mask]
@@ -265,6 +279,8 @@ def _load_bootes1_ting(
         vlos=vlos * auni.km / auni.s,
         vlos_err=vlos_err * auni.km / auni.s,
         vlos_raw=vlos_raw * auni.km / auni.s,
+        X_proj=X_proj * auni.kpc,
+        Y_proj=Y_proj * auni.kpc,
         R_proj=R_proj * auni.kpc,
         mem_prob=mem_prob,
         source='bootes1_ting_' + instrument
@@ -290,13 +306,15 @@ def _load_deimos(
     mem_prob = data_cut['mem_prob'].values
     R_proj = data_cut['R_kin'].values
 
-    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj, mask = \
+    (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
+     X_proj, Y_proj, R_proj, mask) = (
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,
             apply_perspective_corr=apply_perspective_corr,
             R_proj_catalog=R_proj,
         )
+    )
 
     return KinematicData(
         ra=ra * auni.deg,
@@ -304,6 +322,8 @@ def _load_deimos(
         vlos=vlos * auni.km / auni.s,
         vlos_err=vlos_err * auni.km / auni.s,
         vlos_raw=vlos_raw * auni.km / auni.s,
+        X_proj=X_proj * auni.kpc,
+        Y_proj=Y_proj * auni.kpc,
         R_proj=R_proj * auni.kpc,
         mem_prob=mem_prob,
         source='deimos',
@@ -319,32 +339,35 @@ def _load_mock_cartesian(
     """Load kinematic data from mock catalog."""
     data = pd.read_csv(catalog_path)
     if projection_axis == 0:
-        R_proj = np.sqrt(data['y_kpc']**2 + data['z_kpc']**2).values
+        X_proj = data['y_kpc'].values
+        Y_proj = data['z_kpc'].values
         vlos = data['vx_kms'].values
         vlos_err = data['err_vx_kms'].values
         vlos_raw = data['vx_true_kms'].values
-        ra = data['y_kpc'].values
-        dec = data['z_kpc'].values
     elif projection_axis == 1:
-        R_proj = np.sqrt(data['x_kpc']**2 + data['z_kpc']**2).values
+        X_proj = data['x_kpc'].values
+        Y_proj = data['z_kpc'].values
         vlos = data['vy_kms'].values
         vlos_err = data['err_vy_kms'].values
         vlos_raw = data['vy_true_kms'].values
-        ra = data['x_kpc'].values
-        dec = data['z_kpc'].values
     elif projection_axis == 2:
-        R_proj = np.sqrt(data['x_kpc']**2 + data['y_kpc']**2).values
+        X_proj = data['x_kpc'].values
+        Y_proj = data['y_kpc'].values
         vlos = data['vz_kms'].values
         vlos_err = data['err_vz_kms'].values
         vlos_raw = data['vz_true_kms'].values
-        ra = data['x_kpc'].values
-        dec = data['y_kpc'].values
     else:
         raise ValueError(f"Invalid projection_axis: {projection_axis}")
+
+    R_proj = np.sqrt(X_proj**2 + Y_proj**2)
+    ra = X_proj
+    dec = Y_proj
 
     rng = np.random.default_rng(seed)
     if num_max_stars is not None and len(data) > num_max_stars:
         selected_indices = rng.choice(len(data), size=num_max_stars, replace=False)
+        X_proj = X_proj[selected_indices]
+        Y_proj = Y_proj[selected_indices]
         R_proj = R_proj[selected_indices]
         vlos = vlos[selected_indices]
         vlos_err = vlos_err[selected_indices]
@@ -357,6 +380,8 @@ def _load_mock_cartesian(
         vlos=vlos * auni.km / auni.s,
         vlos_err=vlos_err * auni.km / auni.s,
         vlos_raw=vlos * auni.km / auni.s,
+        X_proj=X_proj * auni.kpc,
+        Y_proj=Y_proj * auni.kpc,
         R_proj=R_proj * auni.kpc,
         source='mock',
         mem_prob=np.ones(len(data))
@@ -390,12 +415,14 @@ def _load_mock_icrs(
         vlos_err = vlos_err[selected_indices]
         mem_prob = mem_prob[selected_indices]
 
-    ra, dec, vlos_raw, vlos_err, mem_prob, vlos, R_proj, _ = \
+    (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
+     X_proj, Y_proj, R_proj, _) = (
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,
             apply_perspective_corr=apply_perspective_corr,
         )
+    )
 
     return KinematicData(
         ra=ra * auni.deg,
@@ -403,6 +430,8 @@ def _load_mock_icrs(
         vlos=vlos * auni.km / auni.s,
         vlos_err=vlos_err * auni.km / auni.s,
         vlos_raw=vlos_raw * auni.km / auni.s,
+        X_proj=X_proj * auni.kpc,
+        Y_proj=Y_proj * auni.kpc,
         R_proj=R_proj * auni.kpc,
         source='mock_icrs',
         mem_prob=mem_prob,
