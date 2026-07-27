@@ -10,6 +10,11 @@ import astropy.units as auni
 
 from .coord_utils import rotation_matrix_from_vectors, cartesian_to_spherical
 
+# Conversion factor from proper motion x distance to tangential velocity:
+# v[km/s] = PM_TO_KMS * pm[mas/yr] * distance[kpc]
+# (equivalently, 1 AU/yr = 4.74047 km/s)
+PM_TO_KMS = 4.74047
+
 
 def poisson_confidence_interval(
     n: NDArray[np.integer],
@@ -487,13 +492,19 @@ def preprocess_kinematic_data(
     apply_perspective_corr=True,
     extra_mask=None,
     R_proj_catalog=None,
+    pmra=None,
+    pmdec=None,
+    pmra_err=None,
+    pmdec_err=None,
 ):
     """
     Apply common preprocessing to raw kinematic data arrays.
 
     Applies NaN masking, optional velocity cut, perspective (or systemic)
     velocity correction, and computes projected tangent-plane coordinates
-    and radius.
+    and radius. If proper motions are given, also perspective- (or
+    systemic-) corrects them and converts them to tangential velocities
+    vX, vY in km/s, consistent with the vlos correction.
 
     Parameters
     ----------
@@ -508,23 +519,50 @@ def preprocess_kinematic_data(
     vlos_abs_max : float, optional
         Maximum |vlos - v_sys| in km/s. Stars beyond this are removed.
     apply_perspective_corr : bool
-        If True, apply full perspective rotation correction; otherwise only
-        subtract systemic velocity.
+        If True, apply full perspective rotation correction to vlos (and
+        to pmra/pmdec, if given); otherwise only subtract the systemic
+        velocity (and systemic proper motion).
     extra_mask : ndarray of bool, optional
         Additional boolean mask ANDed with the NaN mask before cuts.
     R_proj_catalog : ndarray, optional
         Pre-computed projected radius from the catalog, in kpc. If given,
         it is masked and used in place of the radius derived from
         ``x_proj``/``y_proj``.
+    pmra, pmdec : ndarray, optional
+        Raw proper motions in mas/yr (pmra assumed to already include the
+        cos(dec) factor, i.e. pmra = mu_alpha* = mu_alpha * cos(dec)).
+        If either is None, no proper-motion-derived quantities are
+        computed and the corresponding return values are all None.
+    pmra_err, pmdec_err : ndarray, optional
+        Uncertainties on pmra/pmdec in mas/yr. Only used to propagate
+        into vX_err/vY_err; either can be omitted independently.
+
     Returns
     -------
     ra, dec, vlos_raw, vlos_err, mem_prob, vlos, x_proj, y_proj, R_proj,
     mask : ndarray
         Masked and processed arrays. All velocities in km/s, x_proj,
         y_proj, and R_proj in kpc.
+    pmra, pmdec, pmra_err, pmdec_err : ndarray or None
+        Masked, uncorrected proper motions and their errors in mas/yr
+        (None if not provided).
+    vX, vY : ndarray or None
+        Perspective- (or systemic-) corrected tangential velocities from
+        pmra/pmdec, in km/s (None if pmra/pmdec not provided).
+    vX_err, vY_err : ndarray or None
+        Propagated uncertainties on vX/vY in km/s (None if the
+        corresponding pmra_err/pmdec_err was not provided).
     """
+    has_pm = pmra is not None and pmdec is not None
+
     # remove all NaN and apply optional extra mask
     mask = ~np.isnan(vlos_raw) & ~np.isnan(vlos_err)
+    if has_pm:
+        mask &= ~np.isnan(pmra) & ~np.isnan(pmdec)
+        if pmra_err is not None:
+            mask &= ~np.isnan(pmra_err)
+        if pmdec_err is not None:
+            mask &= ~np.isnan(pmdec_err)
     if extra_mask is not None:
         mask &= extra_mask
 
@@ -542,9 +580,16 @@ def preprocess_kinematic_data(
     mem_prob = mem_prob[mask]
     if R_proj_catalog is not None:
         R_proj_catalog = R_proj_catalog[mask]
+    if has_pm:
+        pmra = pmra[mask]
+        pmdec = pmdec[mask]
+        if pmra_err is not None:
+            pmra_err = pmra_err[mask]
+        if pmdec_err is not None:
+            pmdec_err = pmdec_err[mask]
 
     if apply_perspective_corr:
-        _, _, dvr_corr = calc_perspective_rotation_corr(
+        dpmra_corr, dpmdec_corr, dvr_corr = calc_perspective_rotation_corr(
             ra, dec,
             meta.ra.to_value(auni.deg),
             meta.dec.to_value(auni.deg),
@@ -555,6 +600,8 @@ def preprocess_kinematic_data(
         )
         vlos = vlos_raw - dvr_corr
     else:
+        dpmra_corr = np.full_like(ra, meta.pmra.to_value(auni.mas / auni.yr))
+        dpmdec_corr = np.full_like(ra, meta.pmdec.to_value(auni.mas / auni.yr))
         vlos = vlos_raw - meta.vlos_systemic.to_value(auni.km / auni.s)
 
     x_proj, y_proj = calc_projected_xy(
@@ -568,7 +615,18 @@ def preprocess_kinematic_data(
     else:
         R_proj = np.sqrt(x_proj**2 + y_proj**2)
 
+    vX = vY = vX_err = vY_err = None
+    if has_pm:
+        dist_kpc = meta.distance.to_value(auni.kpc)
+        vX = PM_TO_KMS * (pmra - dpmra_corr) * dist_kpc
+        vY = PM_TO_KMS * (pmdec - dpmdec_corr) * dist_kpc
+        if pmra_err is not None:
+            vX_err = PM_TO_KMS * pmra_err * dist_kpc
+        if pmdec_err is not None:
+            vY_err = PM_TO_KMS * pmdec_err * dist_kpc
+
     return (
         ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
         x_proj, y_proj, R_proj, mask,
+        pmra, pmdec, pmra_err, pmdec_err, vX, vY, vX_err, vY_err,
     )

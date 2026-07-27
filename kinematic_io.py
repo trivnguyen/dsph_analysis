@@ -34,7 +34,26 @@ class KinematicData:
     R_proj: Quantity  # kpc
     mem_prob: Quantity  # dimensionless
     vlos_raw: Optional[Quantity] = None  # km/s
+    # Optional proper motion data. pmra/pmdec are the perspective- (or
+    # systemic-) corrected proper motions; vX/vY are the corresponding
+    # tangential velocities. All None if the source has no PM data.
+    pmra: Optional[Quantity] = None  # mas/yr
+    pmdec: Optional[Quantity] = None  # mas/yr
+    pmra_err: Optional[Quantity] = None  # mas/yr
+    pmdec_err: Optional[Quantity] = None  # mas/yr
+    vX: Optional[Quantity] = None  # km/s
+    vY: Optional[Quantity] = None  # km/s
+    vX_err: Optional[Quantity] = None  # km/s
+    vY_err: Optional[Quantity] = None  # km/s
     source: Optional[str] = None
+
+    def __len__(self):
+        return len(self.ra)
+
+    @property
+    def has_pm(self) -> bool:
+        """Whether this dataset includes proper motion measurements."""
+        return self.pmra is not None and self.pmdec is not None
 
 
 @dataclass
@@ -146,7 +165,8 @@ def _load_desi(
     mem_prob = data_cut['prob'].values
 
     (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
-     X_proj, Y_proj, R_proj, mask) = (
+     X_proj, Y_proj, R_proj, mask,
+     pmra, pmdec, pmra_err, pmdec_err, vX, vY, vX_err, vY_err) = (
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,
@@ -190,7 +210,8 @@ def _load_walker23(
     mem_prob = data_cut['prob'].values
 
     (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
-     X_proj, Y_proj, R_proj, mask) = (
+     X_proj, Y_proj, R_proj, mask,
+     pmra, pmdec, pmra_err, pmdec_err, vX, vY, vX_err, vY_err) = (
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,
@@ -250,7 +271,8 @@ def _load_bootes1_ting(
 
     if not use_sandford_perspective_corr:
         (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
-         X_proj, Y_proj, R_proj, mask) = (
+         X_proj, Y_proj, R_proj, mask,
+         pmra, pmdec, pmra_err, pmdec_err, vX, vY, vX_err, vY_err) = (
             data_utils.preprocess_kinematic_data(
                 ra, dec, vlos_raw, vlos_err, mem_prob, meta,
                 vlos_abs_max=vlos_abs_max,
@@ -260,7 +282,8 @@ def _load_bootes1_ting(
         )
     else:
         (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
-         X_proj, Y_proj, R_proj, mask) = (
+         X_proj, Y_proj, R_proj, mask,
+         pmra, pmdec, pmra_err, pmdec_err, vX, vY, vX_err, vY_err) = (
             data_utils.preprocess_kinematic_data(
                 ra, dec, vlos_raw, vlos_err, mem_prob, meta,
                 vlos_abs_max=vlos_abs_max,
@@ -307,7 +330,8 @@ def _load_deimos(
     R_proj = data_cut['R_kin'].values
 
     (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
-     X_proj, Y_proj, R_proj, mask) = (
+     X_proj, Y_proj, R_proj, mask,
+     pmra, pmdec, pmra_err, pmdec_err, vX, vY, vX_err, vY_err) = (
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,
@@ -406,6 +430,20 @@ def _load_mock_icrs(
 
     vlos_err = np.sqrt(vlos_err**2 + vlos_err_floor**2)
 
+    # proper motions are optional -- present for mock catalogs built
+    # with a PM-only round (e.g. matched to a Gaia footprint)
+    has_pm = 'pmra_cosdec' in data.columns and 'pmdec' in data.columns
+    pmra = data['pmra_cosdec'].values if has_pm else None
+    pmdec = data['pmdec'].values if has_pm else None
+    pmra_err = (
+        data['pmra_cosdec_err'].values
+        if has_pm and 'pmra_cosdec_err' in data.columns else None
+    )
+    pmdec_err = (
+        data['pmdec_err'].values
+        if has_pm and 'pmdec_err' in data.columns else None
+    )
+
     rng = np.random.default_rng(seed)
     if num_max_stars is not None and len(data) > num_max_stars:
         selected_indices = rng.choice(len(data), size=num_max_stars, replace=False)
@@ -414,13 +452,23 @@ def _load_mock_icrs(
         vlos_raw = vlos_raw[selected_indices]
         vlos_err = vlos_err[selected_indices]
         mem_prob = mem_prob[selected_indices]
+        if has_pm:
+            pmra = pmra[selected_indices]
+            pmdec = pmdec[selected_indices]
+            if pmra_err is not None:
+                pmra_err = pmra_err[selected_indices]
+            if pmdec_err is not None:
+                pmdec_err = pmdec_err[selected_indices]
 
     (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
-     X_proj, Y_proj, R_proj, _) = (
+     X_proj, Y_proj, R_proj, _,
+     pmra, pmdec, pmra_err, pmdec_err, vX, vY, vX_err, vY_err) = (
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,
             apply_perspective_corr=apply_perspective_corr,
+            pmra=pmra, pmdec=pmdec,
+            pmra_err=pmra_err, pmdec_err=pmdec_err,
         )
     )
 
@@ -433,6 +481,18 @@ def _load_mock_icrs(
         X_proj=X_proj * auni.kpc,
         Y_proj=Y_proj * auni.kpc,
         R_proj=R_proj * auni.kpc,
+        pmra=pmra * auni.mas / auni.yr if pmra is not None else None,
+        pmdec=pmdec * auni.mas / auni.yr if pmdec is not None else None,
+        pmra_err=(
+            pmra_err * auni.mas / auni.yr if pmra_err is not None else None
+        ),
+        pmdec_err=(
+            pmdec_err * auni.mas / auni.yr if pmdec_err is not None else None
+        ),
+        vX=vX * auni.km / auni.s if vX is not None else None,
+        vY=vY * auni.km / auni.s if vY is not None else None,
+        vX_err=vX_err * auni.km / auni.s if vX_err is not None else None,
+        vY_err=vY_err * auni.km / auni.s if vY_err is not None else None,
         source='mock_icrs',
         mem_prob=mem_prob,
     )
