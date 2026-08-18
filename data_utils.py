@@ -376,7 +376,7 @@ def calc_perspective_rotation_corr(
     ra_center: float,
     dec_center: float,
     dist_center: float,
-    pmra_center: float,
+    pmra_cosdec_center: float,
     pmdec_center: float,
     vrad_center: float,
 ) -> Tuple[NDArray[np.floating], NDArray[np.floating], NDArray[np.floating]]:
@@ -394,14 +394,14 @@ def calc_perspective_rotation_corr(
         Right ascension and declination of the galaxy center in degrees.
     dist_center: float
         Distance to the galaxy center in kpc.
-    pmra_center, pmdec_center: float
+    pmra_cosdec_center, pmdec_center: float
         Proper motion of the galaxy center in mas/yr.
     vrad_center: float
         Radial velocity of the galaxy center in km/s.
 
     Returns
     -------
-    dpmra, dpmdec, dvrad: array-like
+    dpmra_cosdec, dpmdec, dvrad: array-like
         Corrections to the proper motion in mas/yr and radial velocity in km/s
         for each star due to perspective rotation effect.
     """
@@ -410,7 +410,7 @@ def calc_perspective_rotation_corr(
                        dec=dec_center * auni.deg,
                        distance=dist_center * auni.kpc,
                        radial_velocity=vrad_center * kms,
-                       pm_ra_cosdec=pmra_center * masyr,
+                       pm_ra_cosdec=pmra_cosdec_center * masyr,
                        pm_dec=pmdec_center * masyr)
     Cg0 = C0.transform_to(acoo.Galactocentric)
     # center of the system
@@ -447,8 +447,10 @@ def calc_projected_xy(
     Calculate the projected tangent-plane coordinates from the galaxy
     center.
 
-    Uses small angle approximation to convert angular separation to
-    physical distance. The projected radius can be recovered as
+    Uses astropy's sky-offset frame for an exact tangent-plane
+    projection (rather than a small-angle approximation), with
+    astropy units handling the angle-to-physical-distance conversion.
+    The projected radius can be recovered as
     ``sqrt(x_proj**2 + y_proj**2)``.
 
     Parameters
@@ -471,17 +473,17 @@ def calc_projected_xy(
     y_proj : NDArray[np.floating]
         Projected coordinate along the Dec direction in kpc.
     """
-    ra_rad = np.deg2rad(ra)
-    dec_rad = np.deg2rad(dec)
-    ra_center_rad = np.deg2rad(ra_center)
-    dec_center_rad = np.deg2rad(dec_center)
+    center = acoo.SkyCoord(ra=ra_center * auni.deg, dec=dec_center * auni.deg)
+    offset = acoo.SkyCoord(ra=ra * auni.deg, dec=dec * auni.deg).transform_to(
+        center.skyoffset_frame()
+    )
 
-    delta_ra = ra_rad - ra_center_rad
-    delta_dec = dec_rad - dec_center_rad
-
-    # Small angle approximation
-    x_proj = dist_center * delta_ra * np.cos(dec_center_rad)
-    y_proj = dist_center * delta_dec
+    dist_center = dist_center * auni.kpc
+    angle_to_length = auni.dimensionless_angles()
+    x_proj = (dist_center * offset.lon.wrap_at(180 * auni.deg)).to_value(
+        auni.kpc, equivalencies=angle_to_length)
+    y_proj = (dist_center * offset.lat).to_value(
+        auni.kpc, equivalencies=angle_to_length)
     return x_proj, y_proj
 
 
@@ -492,9 +494,9 @@ def preprocess_kinematic_data(
     apply_perspective_corr=True,
     extra_mask=None,
     R_proj_catalog=None,
-    pmra=None,
+    pmra_cosdec=None,
     pmdec=None,
-    pmra_err=None,
+    pmra_cosdec_err=None,
     pmdec_err=None,
 ):
     """
@@ -520,7 +522,7 @@ def preprocess_kinematic_data(
         Maximum |vlos - v_sys| in km/s. Stars beyond this are removed.
     apply_perspective_corr : bool
         If True, apply full perspective rotation correction to vlos (and
-        to pmra/pmdec, if given); otherwise only subtract the systemic
+        to pmra_cosdec/pmdec, if given); otherwise only subtract the systemic
         velocity (and systemic proper motion).
     extra_mask : ndarray of bool, optional
         Additional boolean mask ANDed with the NaN mask before cuts.
@@ -528,13 +530,18 @@ def preprocess_kinematic_data(
         Pre-computed projected radius from the catalog, in kpc. If given,
         it is masked and used in place of the radius derived from
         ``x_proj``/``y_proj``.
-    pmra, pmdec : ndarray, optional
-        Raw proper motions in mas/yr (pmra assumed to already include the
-        cos(dec) factor, i.e. pmra = mu_alpha* = mu_alpha * cos(dec)).
+    pmra_cosdec, pmdec : ndarray, optional
+        Raw proper motions in mas/yr (pmra_cosdec assumed to already include the
+        cos(dec) factor, i.e. pmra_cosdec = mu_alpha* = mu_alpha * cos(dec)).
         If either is None, no proper-motion-derived quantities are
         computed and the corresponding return values are all None.
-    pmra_err, pmdec_err : ndarray, optional
-        Uncertainties on pmra/pmdec in mas/yr. Only used to propagate
+        Individual stars may have NaN vlos and/or NaN pmra_cosdec/pmdec (mixed-
+        completeness catalogs where not every star has both vlos and PM
+        measured) -- a star is kept as long as it has at least one of
+        the two; the missing quantity comes back as NaN rather than the
+        star being dropped.
+    pmra_cosdec_err, pmdec_err : ndarray, optional
+        Uncertainties on pmra_cosdec/pmdec in mas/yr. Only used to propagate
         into vX_err/vY_err; either can be omitted independently.
 
     Returns
@@ -543,35 +550,43 @@ def preprocess_kinematic_data(
     mask : ndarray
         Masked and processed arrays. All velocities in km/s, x_proj,
         y_proj, and R_proj in kpc.
-    pmra, pmdec, pmra_err, pmdec_err : ndarray or None
+    pmra_cosdec, pmdec, pmra_cosdec_err, pmdec_err : ndarray or None
         Masked, uncorrected proper motions and their errors in mas/yr
         (None if not provided).
     vX, vY : ndarray or None
         Perspective- (or systemic-) corrected tangential velocities from
-        pmra/pmdec, in km/s (None if pmra/pmdec not provided).
+        pmra_cosdec/pmdec, in km/s (None if pmra_cosdec/pmdec not provided).
     vX_err, vY_err : ndarray or None
         Propagated uncertainties on vX/vY in km/s (None if the
-        corresponding pmra_err/pmdec_err was not provided).
+        corresponding pmra_cosdec_err/pmdec_err was not provided).
     """
-    has_pm = pmra is not None and pmdec is not None
+    has_pm = pmra_cosdec is not None and pmdec is not None
 
-    # remove all NaN and apply optional extra mask
-    mask = ~np.isnan(vlos_raw) & ~np.isnan(vlos_err)
+    # A star is kept if it has a valid vlos OR a valid PM measurement --
+    # mixed-completeness catalogs (e.g. some stars vlos-only, others
+    # PM-only) are expected, so this must be an OR, not an AND. Whichever
+    # quantity a given star lacks comes back as NaN, not dropped.
+    has_vlos = ~np.isnan(vlos_raw) & ~np.isnan(vlos_err)
     if has_pm:
-        mask &= ~np.isnan(pmra) & ~np.isnan(pmdec)
-        if pmra_err is not None:
-            mask &= ~np.isnan(pmra_err)
+        has_valid_pm = ~np.isnan(pmra_cosdec) & ~np.isnan(pmdec)
+        if pmra_cosdec_err is not None:
+            has_valid_pm &= ~np.isnan(pmra_cosdec_err)
         if pmdec_err is not None:
-            mask &= ~np.isnan(pmdec_err)
+            has_valid_pm &= ~np.isnan(pmdec_err)
+        mask = has_vlos | has_valid_pm
+    else:
+        mask = has_vlos
     if extra_mask is not None:
         mask &= extra_mask
 
-    # apply vlos_abs_max cut
+    # apply vlos_abs_max cut -- only to stars that actually have a vlos,
+    # so PM-only stars aren't dropped by a cut that doesn't apply to them
     # TODO: in the future, we may want to apply this cut after perspective correction instead of on the raw vlos
     # for now, keep it here so that the cut is consistent with previous analysis
     if vlos_abs_max is not None:
         vlos_raw_nosys = vlos_raw - meta.vlos_systemic.to_value(auni.km / auni.s)
-        mask &= (np.abs(vlos_raw_nosys) < vlos_abs_max)
+        within_vlos_cut = np.abs(vlos_raw_nosys) < vlos_abs_max
+        mask &= within_vlos_cut | ~has_vlos
 
     ra = ra[mask]
     dec = dec[mask]
@@ -581,26 +596,26 @@ def preprocess_kinematic_data(
     if R_proj_catalog is not None:
         R_proj_catalog = R_proj_catalog[mask]
     if has_pm:
-        pmra = pmra[mask]
+        pmra_cosdec = pmra_cosdec[mask]
         pmdec = pmdec[mask]
-        if pmra_err is not None:
-            pmra_err = pmra_err[mask]
+        if pmra_cosdec_err is not None:
+            pmra_cosdec_err = pmra_cosdec_err[mask]
         if pmdec_err is not None:
             pmdec_err = pmdec_err[mask]
 
     if apply_perspective_corr:
-        dpmra_corr, dpmdec_corr, dvr_corr = calc_perspective_rotation_corr(
+        dpmra_cosdec_corr, dpmdec_corr, dvr_corr = calc_perspective_rotation_corr(
             ra, dec,
             meta.ra.to_value(auni.deg),
             meta.dec.to_value(auni.deg),
             meta.distance.to_value(auni.kpc),
-            meta.pmra.to_value(auni.mas / auni.yr),
+            meta.pmra_cosdec.to_value(auni.mas / auni.yr),
             meta.pmdec.to_value(auni.mas / auni.yr),
             meta.vlos_systemic.to_value(auni.km / auni.s),
         )
         vlos = vlos_raw - dvr_corr
     else:
-        dpmra_corr = np.full_like(ra, meta.pmra.to_value(auni.mas / auni.yr))
+        dpmra_cosdec_corr = np.full_like(ra, meta.pmra_cosdec.to_value(auni.mas / auni.yr))
         dpmdec_corr = np.full_like(ra, meta.pmdec.to_value(auni.mas / auni.yr))
         vlos = vlos_raw - meta.vlos_systemic.to_value(auni.km / auni.s)
 
@@ -618,15 +633,15 @@ def preprocess_kinematic_data(
     vX = vY = vX_err = vY_err = None
     if has_pm:
         dist_kpc = meta.distance.to_value(auni.kpc)
-        vX = PM_TO_KMS * (pmra - dpmra_corr) * dist_kpc
+        vX = PM_TO_KMS * (pmra_cosdec - dpmra_cosdec_corr) * dist_kpc
         vY = PM_TO_KMS * (pmdec - dpmdec_corr) * dist_kpc
-        if pmra_err is not None:
-            vX_err = PM_TO_KMS * pmra_err * dist_kpc
+        if pmra_cosdec_err is not None:
+            vX_err = PM_TO_KMS * pmra_cosdec_err * dist_kpc
         if pmdec_err is not None:
             vY_err = PM_TO_KMS * pmdec_err * dist_kpc
 
     return (
         ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
         x_proj, y_proj, R_proj, mask,
-        pmra, pmdec, pmra_err, pmdec_err, vX, vY, vX_err, vY_err,
+        pmra_cosdec, pmdec, pmra_cosdec_err, pmdec_err, vX, vY, vX_err, vY_err,
     )

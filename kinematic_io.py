@@ -34,12 +34,12 @@ class KinematicData:
     R_proj: Quantity  # kpc
     mem_prob: Quantity  # dimensionless
     vlos_raw: Optional[Quantity] = None  # km/s
-    # Optional proper motion data. pmra/pmdec are the perspective- (or
+    # Optional proper motion data. pmra_cosdec/pmdec are the perspective- (or
     # systemic-) corrected proper motions; vX/vY are the corresponding
     # tangential velocities. All None if the source has no PM data.
-    pmra: Optional[Quantity] = None  # mas/yr
+    pmra_cosdec: Optional[Quantity] = None  # mas/yr
     pmdec: Optional[Quantity] = None  # mas/yr
-    pmra_err: Optional[Quantity] = None  # mas/yr
+    pmra_cosdec_err: Optional[Quantity] = None  # mas/yr
     pmdec_err: Optional[Quantity] = None  # mas/yr
     vX: Optional[Quantity] = None  # km/s
     vY: Optional[Quantity] = None  # km/s
@@ -53,7 +53,7 @@ class KinematicData:
     @property
     def has_pm(self) -> bool:
         """Whether this dataset includes proper motion measurements."""
-        return self.pmra is not None and self.pmdec is not None
+        return self.pmra_cosdec is not None and self.pmdec is not None
 
 
 @dataclass
@@ -63,7 +63,7 @@ class DwarfMeta:
     ra: Quantity  # deg
     dec: Quantity  # deg
     distance: Quantity  # kpc
-    pmra: Quantity  # mas/yr
+    pmra_cosdec: Quantity  # mas/yr
     pmdec: Quantity  # mas/yr
     vlos_systemic: Quantity  # km/s
     rhalf_arcmin: Quantity  # arcmin
@@ -126,7 +126,7 @@ def load_meta(
         ra=row.ra *  auni.deg,
         dec=row.dec * auni.deg,
         distance=row.distance * auni.kpc,
-        pmra=row.pmra * auni.mas / auni.yr,
+        pmra_cosdec=row.pmra * auni.mas / auni.yr,
         pmdec=row.pmdec * auni.mas / auni.yr,
         vlos_systemic=row.vlos_systemic * auni.km / auni.s,
         rhalf_arcmin=row.rhalf * auni.arcmin,
@@ -166,7 +166,7 @@ def _load_desi(
 
     (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
      X_proj, Y_proj, R_proj, mask,
-     pmra, pmdec, pmra_err, pmdec_err, vX, vY, vX_err, vY_err) = (
+     pmra_cosdec, pmdec, pmra_cosdec_err, pmdec_err, vX, vY, vX_err, vY_err) = (
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,
@@ -211,7 +211,7 @@ def _load_walker23(
 
     (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
      X_proj, Y_proj, R_proj, mask,
-     pmra, pmdec, pmra_err, pmdec_err, vX, vY, vX_err, vY_err) = (
+     pmra_cosdec, pmdec, pmra_cosdec_err, pmdec_err, vX, vY, vX_err, vY_err) = (
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,
@@ -272,7 +272,7 @@ def _load_bootes1_ting(
     if not use_sandford_perspective_corr:
         (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
          X_proj, Y_proj, R_proj, mask,
-         pmra, pmdec, pmra_err, pmdec_err, vX, vY, vX_err, vY_err) = (
+         pmra_cosdec, pmdec, pmra_cosdec_err, pmdec_err, vX, vY, vX_err, vY_err) = (
             data_utils.preprocess_kinematic_data(
                 ra, dec, vlos_raw, vlos_err, mem_prob, meta,
                 vlos_abs_max=vlos_abs_max,
@@ -283,7 +283,7 @@ def _load_bootes1_ting(
     else:
         (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
          X_proj, Y_proj, R_proj, mask,
-         pmra, pmdec, pmra_err, pmdec_err, vX, vY, vX_err, vY_err) = (
+         pmra_cosdec, pmdec, pmra_cosdec_err, pmdec_err, vX, vY, vX_err, vY_err) = (
             data_utils.preprocess_kinematic_data(
                 ra, dec, vlos_raw, vlos_err, mem_prob, meta,
                 vlos_abs_max=vlos_abs_max,
@@ -331,7 +331,7 @@ def _load_deimos(
 
     (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
      X_proj, Y_proj, R_proj, mask,
-     pmra, pmdec, pmra_err, pmdec_err, vX, vY, vX_err, vY_err) = (
+     pmra_cosdec, pmdec, pmra_cosdec_err, pmdec_err, vX, vY, vX_err, vY_err) = (
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,
@@ -433,9 +433,9 @@ def _load_mock_icrs(
     # proper motions are optional -- present for mock catalogs built
     # with a PM-only round (e.g. matched to a Gaia footprint)
     has_pm = 'pmra_cosdec' in data.columns and 'pmdec' in data.columns
-    pmra = data['pmra_cosdec'].values if has_pm else None
+    pmra_cosdec = data['pmra_cosdec'].values if has_pm else None
     pmdec = data['pmdec'].values if has_pm else None
-    pmra_err = (
+    pmra_cosdec_err = (
         data['pmra_cosdec_err'].values
         if has_pm and 'pmra_cosdec_err' in data.columns else None
     )
@@ -453,22 +453,21 @@ def _load_mock_icrs(
         vlos_err = vlos_err[selected_indices]
         mem_prob = mem_prob[selected_indices]
         if has_pm:
-            pmra = pmra[selected_indices]
+            pmra_cosdec = pmra_cosdec[selected_indices]
             pmdec = pmdec[selected_indices]
-            if pmra_err is not None:
-                pmra_err = pmra_err[selected_indices]
+            if pmra_cosdec_err is not None:
+                pmra_cosdec_err = pmra_cosdec_err[selected_indices]
             if pmdec_err is not None:
                 pmdec_err = pmdec_err[selected_indices]
 
-    (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
-     X_proj, Y_proj, R_proj, _,
-     pmra, pmdec, pmra_err, pmdec_err, vX, vY, vX_err, vY_err) = (
+    (ra, dec, vlos_raw, vlos_err, mem_prob, vlos, X_proj, Y_proj, R_proj, _,
+     pmra_cosdec, pmdec, pmra_cosdec_err, pmdec_err, vX, vY, vX_err, vY_err) = (
         data_utils.preprocess_kinematic_data(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,
             apply_perspective_corr=apply_perspective_corr,
-            pmra=pmra, pmdec=pmdec,
-            pmra_err=pmra_err, pmdec_err=pmdec_err,
+            pmra_cosdec=pmra_cosdec, pmdec=pmdec,
+            pmra_cosdec_err=pmra_cosdec_err, pmdec_err=pmdec_err,
         )
     )
 
@@ -481,10 +480,10 @@ def _load_mock_icrs(
         X_proj=X_proj * auni.kpc,
         Y_proj=Y_proj * auni.kpc,
         R_proj=R_proj * auni.kpc,
-        pmra=pmra * auni.mas / auni.yr if pmra is not None else None,
+        pmra_cosdec=pmra_cosdec * auni.mas / auni.yr if pmra_cosdec is not None else None,
         pmdec=pmdec * auni.mas / auni.yr if pmdec is not None else None,
-        pmra_err=(
-            pmra_err * auni.mas / auni.yr if pmra_err is not None else None
+        pmra_cosdec_err=(
+            pmra_cosdec_err * auni.mas / auni.yr if pmra_cosdec_err is not None else None
         ),
         pmdec_err=(
             pmdec_err * auni.mas / auni.yr if pmdec_err is not None else None
