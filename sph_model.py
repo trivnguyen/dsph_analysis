@@ -211,22 +211,52 @@ class GeneralizedOMJeans:
         return np.array([self._sigma2_pmT_R(R, sigma2_r_fn) for R in r])
 
     ### Higher-order moments code """
-    def _F_los(self, r, R):
-        """ Higher-order Jeans term F_los(r, R) for the line-of-sight velocity dispersion.
-        Eq. (20) in Bañares-Hernández, Read, and Júlio 2025 but without the <v_r^4> term, which is computed separately.
-        """
-        a1 = 1 - 2 * self.beta_prime(r) * R**2 / r**2
-        a2 = 0.5 * self.beta_prime(r) * (1 + self.beta_prime(r)) * R**4 / r**4
-        a3 = -0.25 * self.dbeta_prime_dr(r) * R**4 / r**3
-        return a1 + a2 + a3
-
     def _sigma4_r(self, r, sigma2_r_fn):
+        """ The fourth-order moment of the radial velocity distribution <v_r^4> """
         def integrand(s):
             return sigma2_r_fn(s) * constants.G * self.M(s) / s**2 * self.nu(s) * self.gbeta_prime(s)
 
         c1 = 3.0 / (self.nu(r) * self.gbeta_prime(r))
         integral, _ = quad(integrand, r, np.inf, epsabs=1, epsrel=1)
         return c1 * integral * _TO_KM2_S2
+
+    def _F_los(self, r, R):
+        """ Higher-order Jeans term F_los(r, R) for the line-of-sight velocity dispersion.
+        Eq. (20) in Bañares-Hernández, Read, and Júlio 2025 but without the <v_r^4> term, which is computed separately.
+        Separating <v_r^4> requires assuming beta = beta_prime.
+        """
+        beta_prime_r = self.beta_prime(r)
+        dbeta_prime_dr_r = self.dbeta_prime_dr(r)
+
+        a1 = 1 - 2 * beta_prime_r * R**2 / r**2
+        a2 = 0.5 * beta_prime_r * (1 + beta_prime_r) * R**4 / r**4
+        a3 = -0.25 * dbeta_prime_dr_r * R**4 / r**3
+        return a1 + a2 + a3
+
+    def _F_pmT(self, r, R):
+        """ Higher-order Jeans term F_pmT(r, R) for the line-of-sight velocity dispersion.
+        Eq. (21) in Bañares-Hernández, Read, and Júlio 2025 but without the <v_r^4> term, which is computed separately.
+        Separating <v_r^4> requires assuming beta = beta_prime.
+        """
+        beta_prime_r = self.beta_prime(r)
+        dbeta_prime_dr_r = self.dbeta_prime_dr(r)
+
+        a1 = (1 - beta_prime_r) * (2 - beta_prime_r)
+        a2 = -0.5 * r * dbeta_prime_dr_r
+        return 0.5 * (a1 + a2)
+
+    def _F_pmR(self, r, R):
+        """ Higher-order Jeans term F_pmR(r, R) for the line-of-sight velocity dispersion.
+        Eq. (22) in Bañares-Hernández, Read, and Júlio 2025 but without the <v_r^4> term, which is computed separately.
+        Separating <v_r^4> requires assuming beta = beta_prime.
+        """
+        beta_prime_r = self.beta_prime(r)
+        dbeta_prime_dr_r = self.dbeta_prime_dr(r)
+
+        a1 = (1 - 2 * R**2 / r**2 + R**4 / r**4) * self._F_pmT(r, R)
+        a2 = 2 * (1 - beta_prime_r) * R**2 / r**2
+        a3 = (1 - 2 * beta_prime_r) * R**4 / r**4
+        return a1 + a2 + a3
 
     def _sigma4_los_R(self, R, sigma4_r_fn):
         """Line-of-sight velocity dispersion squared at projected radius R."""
