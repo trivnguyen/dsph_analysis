@@ -38,7 +38,7 @@ class GeneralizedOMJeans:
     """
     _QUAD_EXACT_KW = dict(epsabs=1, epsrel=1, limit=200)
 
-    def __init__(self, theta, min_rgrid=1e-3, max_rgrid=50, n_grid=500):
+    def __init__(self, theta, min_rgrid=1e-3, max_rgrid=50, n_grid=500, betatype="two_to_beta"):
         """
         Args:
             theta (list): Model parameters [log_rho_s, log_r_s, alp, bet, gam,
@@ -52,19 +52,33 @@ class GeneralizedOMJeans:
         self.bet = self.param[3]
         self.gam = self.param[4]
         self.log_r_a = self.param[5]
-        self.two_to_beta0 = self.param[6]
-        self.two_to_betainf = self.param[7]
         self.rh = self.param[8]
         self.vsys_los = self.param[9]
         self.vsys_pmR = self.param[10]
         self.vsys_pmT = self.param[11]
+        self.betatype = betatype
+
+        if betatype=="beta":
+            self.beta0 = self.param[6]
+            self.betainf = self.param[7]
+        elif betatype=="betatilde":
+            self.betatilde0 = self.param[6]
+            self.betatildeinf = self.param[7]
+            self.beta0 = 2 * self.betatilde0 / (1 + self.betatilde0)
+            self.betainf = 2 * self.betatildeinf / (1 + self.betatildeinf)
+        elif betatype=="two_to_beta":
+            self.two_to_beta0 = self.param[6]
+            self.two_to_betainf = self.param[7]
+            self.beta0 = np.log2(self.two_to_beta0)
+            self.betainf = np.log2(self.two_to_betainf)
+        else:
+            raise ValueError(
+                f"Unknown betatype: {betatype}. Must be one of ['beta', 'betatilde', 'two_to_beta'].")
 
         # derived parameters
         self.rho_s = 10.0 ** self.log_rho_s
         self.r_s = 10.0 ** self.log_r_s
         self.r_a = 10.0 ** self.log_r_a
-        self.beta0 = np.log2(self.two_to_beta0)
-        self.betainf = np.log2(self.two_to_betainf)
 
         # interpolation grid for sigma_r^2
         self.min_rgrid = min_rgrid
