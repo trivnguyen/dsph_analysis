@@ -5,7 +5,11 @@ This module provides data loading and processing functions for kinematic
 catalogs from different observational sources (DESI, Walker+23, etc.).
 """
 
+import functools
+import inspect
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
@@ -16,11 +20,18 @@ from astropy.units.quantity import Quantity
 
 from . import data_utils
 
-DEFAULT_META_URL = (
+# Upstream source, kept for reference and for refresh_local_meta_table().
+DWARF_MW_URL = (
     "https://raw.githubusercontent.com/apace7/local_volume_database/refs/heads/"
     "main/data/dwarf_mw.csv"
 )
-ALL_LOADERS = ('desi', 'walker23', 'bootes1_ting', 'deimos', 'mock_cartesian', 'mock_icrs')
+# Local cache of DWARF_MW_URL, used by default so loading metadata does not
+# depend on network access. Refresh with refresh_local_meta_table().
+DEFAULT_META_PATH = Path(__file__).parent / "data" / "dwarf_mw.csv"
+ALL_LOADERS = ('desi', 'walker23', 's5comp', 'deimos', 'pace',
+               'mock_cartesian', 'mock_icrs')
+# Populated at bottom of module, once every _load_* function is defined.
+LOADERS: dict[str, Callable] = {}
 
 @dataclass
 class KinematicData:
@@ -77,10 +88,14 @@ class DwarfMeta:
     log_mass_wolf_ep: Optional[Quantity] = None
 
 def load_meta_table(
-    meta_path: str = DEFAULT_META_URL
+    meta_path: str = DEFAULT_META_PATH
 ):
     """
     Load the entire metadata table from CSV file or URL.
+
+    Defaults to the local cached copy (DEFAULT_META_PATH) so this works
+    offline; pass DWARF_MW_URL (or any other path/URL) to read from
+    elsewhere, or call refresh_local_meta_table() to update the cache.
 
     Parameters
     ----------
@@ -97,10 +112,14 @@ def load_meta_table(
 
 def load_meta(
     target_key,
-    meta_path: str = DEFAULT_META_URL
+    meta_path: str = DEFAULT_META_PATH
 ) -> DwarfMeta:
     """
     Load dwarf galaxy metadata from CSV file or URL.
+
+    Defaults to the local cached copy (DEFAULT_META_PATH) so this works
+    offline; pass DWARF_MW_URL (or any other path/URL) to read from
+    elsewhere, or call refresh_local_meta_table() to update the cache.
 
     Parameters
     ----------
@@ -139,6 +158,179 @@ def load_meta(
         log_mass_wolf_em=row.get('mass_dynamical_wolf_em', np.nan),
         log_mass_wolf_ep=row.get('mass_dynamical_wolf_ep', np.nan),
     )
+
+
+# =============================================================================
+# Galaxy name abbreviations
+# =============================================================================
+
+# Compact galaxy tokens used in catalog file names: a three-letter stem
+# plus the LVDB numeral, e.g. 'draco_1' -> 'dra1'. The numeral is never
+# dropped, because 'draco_1' and 'draco_2' are different galaxies and a
+# bare 'dra' would be ambiguous. Verified collision-free across every
+# numbered key in dwarf_mw.csv (65 of them) by test_abbrev_unique().
+# Local cache of the `abbreviation` field LVDB carries in its per-system
+# YAML inputs (data_input/<key>.yaml, under `name_discovery`). It is NOT
+# in the combined dwarf_mw.csv table, which is why it needs its own
+# cache; refresh it with refresh_local_abbrev_table().
+DEFAULT_ABBREV_PATH = Path(__file__).parent / "data" / "lvdb_abbrev.csv"
+
+# Template for the per-system YAML inputs, used only by the refresh.
+LVDB_YAML_URL = (
+    "https://raw.githubusercontent.com/apace7/local_volume_database/main/"
+    "data_input/{key}.yaml"
+)
+
+
+@functools.lru_cache(maxsize=None)
+def _abbrev_tables(abbrev_path: str = DEFAULT_ABBREV_PATH) -> tuple:
+    """
+    Load the LVDB abbreviation table in both directions.
+
+    Abbreviations are lower-cased here: LVDB writes them in mixed case
+    ('BooI', 'HyaII', 'CVnI') but its own keys are all lower-case, and
+    file names should be too. Lower-casing is checked not to introduce
+    collisions.
+
+    Args:
+        abbrev_path: CSV with `key` and `abbreviation` columns.
+
+    Returns:
+        (key -> abbreviation, abbreviation -> key), both lower-cased.
+
+    Raises:
+        ValueError: If two keys share an abbreviation once lower-cased,
+            which would make file names ambiguous.
+    """
+    table = pd.read_csv(abbrev_path)
+    # Reason: a few LVDB abbreviations contain spaces ('Do V'); file
+    # name tokens must be a single alphanumeric word.
+    forward = {
+        str(row.key): re.sub(r'\s+', '', str(row.abbreviation)).lower()
+        for row in table.itertuples()
+    }
+    reverse: dict[str, list[str]] = {}
+    for key, abbrev in forward.items():
+        reverse.setdefault(abbrev, []).append(key)
+    collisions = {a: k for a, k in reverse.items() if len(k) > 1}
+    if collisions:
+        raise ValueError(f"Ambiguous galaxy abbreviations: {collisions}")
+    return forward, {a: k[0] for a, k in reverse.items()}
+
+
+def key_to_abbrev(key: str, abbrev_path: str = DEFAULT_ABBREV_PATH) -> str:
+    """
+    Convert an LVDB target key to its LVDB abbreviation, lower-cased.
+
+    This is LVDB's own `abbreviation` field, not a truncation of the
+    name. That distinction matters: truncating to three letters collides
+    Hydra with Hydrus and Leo with Leo Minor, whereas LVDB (following the
+    IAU constellation abbreviations) distinguishes them as 'hyaii'/'hyii'
+    and 'leoi'/'lmii'. Abbreviations are therefore not fixed-length -
+    classical dwarfs are bare ('dra', 'scl', 'umi', 'for') and newer ones
+    carry a Roman numeral ('booi', 'hyaii').
+
+    Args:
+        key: LVDB key, e.g. 'draco_1'.
+        abbrev_path: CSV cache to resolve against.
+
+    Returns:
+        The lower-cased abbreviation, e.g. 'dra'.
+
+    Raises:
+        ValueError: If `key` is absent from the abbreviation table. LVDB
+            populates `abbreviation` for MW dwarf galaxies only, so a
+            key outside that set legitimately has none.
+
+    Example:
+        >>> key_to_abbrev('ursa_minor_1')
+        'umi'
+    """
+    forward, _ = _abbrev_tables(abbrev_path)
+    if key not in forward:
+        raise ValueError(
+            f"No LVDB abbreviation for key {key!r}. LVDB defines "
+            f"`abbreviation` for MW dwarf galaxies only; refresh the "
+            f"cache with refresh_local_abbrev_table() if it is new."
+        )
+    return forward[key]
+
+
+def abbrev_to_key(abbrev: str, abbrev_path: str = DEFAULT_ABBREV_PATH) -> str:
+    """
+    Convert an LVDB abbreviation back to its target key.
+
+    Args:
+        abbrev: Abbreviation, case-insensitive, e.g. 'dra' or 'Dra'.
+        abbrev_path: CSV cache to resolve against.
+
+    Returns:
+        The LVDB key, e.g. 'draco_1'.
+
+    Raises:
+        ValueError: If `abbrev` matches no key in the table.
+
+    Example:
+        >>> abbrev_to_key('umi')
+        'ursa_minor_1'
+    """
+    _, reverse = _abbrev_tables(abbrev_path)
+    token = abbrev.lower()
+    if token not in reverse:
+        raise ValueError(
+            f"Unknown galaxy abbreviation {abbrev!r}. "
+            f"Known: {sorted(reverse)}"
+        )
+    return reverse[token]
+
+
+def refresh_local_abbrev_table(
+    keys: Optional[list] = None,
+    meta_path: str = DEFAULT_META_PATH,
+    local_path: str = DEFAULT_ABBREV_PATH,
+) -> None:
+    """
+    Re-scrape LVDB's `abbreviation` field and overwrite the local cache.
+
+    One HTTP request per system, so this is deliberately not called at
+    import time - the shipped CSV is the normal path.
+
+    Args:
+        keys: Keys to fetch. Defaults to every key in the metadata table.
+        meta_path: Metadata CSV used to derive `keys` when not given.
+        local_path: CSV to write.
+    """
+    import urllib.request  # Reason: only needed on an explicit refresh.
+
+    if keys is None:
+        keys = sorted(load_meta_table(meta_path)['key'].astype(str))
+    rows = []
+    for key in keys:
+        with urllib.request.urlopen(
+                LVDB_YAML_URL.format(key=key), timeout=60) as response:
+            text = response.read().decode()
+        match = re.search(r'^\s+abbreviation:\s*(.+?)\s*$', text, re.M)
+        if match:
+            rows.append((key, match.group(1).strip().strip('"\'')))
+    pd.DataFrame(rows, columns=['key', 'abbreviation']).to_csv(
+        local_path, index=False)
+
+
+def refresh_local_meta_table(
+    url: str = DWARF_MW_URL,
+    local_path: str = DEFAULT_META_PATH,
+) -> None:
+    """
+    Re-download the metadata table and overwrite the local cache.
+
+    Parameters
+    ----------
+    url : str
+        URL to fetch the metadata CSV from.
+    local_path : str
+        Local file path to write the metadata CSV to.
+    """
+    pd.read_csv(url).to_csv(local_path, index=False)
 
 
 # =============================================================================
@@ -232,7 +424,7 @@ def _load_walker23(
         source='walker23',
     )
 
-def _load_bootes1_ting(
+def _load_s5comp(
     catalog_path: str,
     meta: DwarfMeta,
     mem_prob_min: float = 0.8,
@@ -242,7 +434,7 @@ def _load_bootes1_ting(
     use_sandford_perspective_corr: bool = False,
     remove_binaries: bool = True,
 ) -> KinematicData:
-    """Load kinematic data from Boo I Ting catalog."""
+    """Load kinematic data from the Bootes I S5 compilation."""
     if instrument not in ['mmt', 'vlt', 's5', 'aat', 'avg']:
         raise ValueError(f"Unknown instrument: {instrument}")
 
@@ -306,7 +498,7 @@ def _load_bootes1_ting(
         Y_proj=Y_proj * auni.kpc,
         R_proj=R_proj * auni.kpc,
         mem_prob=mem_prob,
-        source='bootes1_ting_' + instrument
+        source='s5comp_' + instrument
     )
 
 def _load_deimos(
@@ -336,7 +528,6 @@ def _load_deimos(
             ra, dec, vlos_raw, vlos_err, mem_prob, meta,
             vlos_abs_max=vlos_abs_max,
             apply_perspective_corr=apply_perspective_corr,
-            R_proj_catalog=R_proj,
         )
     )
 
@@ -353,12 +544,133 @@ def _load_deimos(
         source='deimos',
     )
 
+# Membership columns carried by every `combined_structure_*.fits` file.
+# Probability columns are cut at `mem_prob_min`; flag columns are 0/1 and
+# are used as a straight boolean selection (mem_prob is then set to 1).
+PACE_MEMBER_PROB_COLUMNS = (
+    'member_v10d1', 'member_v10d2', 'member_v11d1', 'member_v11d2',
+    'member_all_v10', 'member_all_v11',
+)
+PACE_MEMBER_FLAG_COLUMNS = (
+    'member_candidate', 'member_final', 'member_zscore',
+)
+PACE_MEMBER_COLUMNS = PACE_MEMBER_PROB_COLUMNS + PACE_MEMBER_FLAG_COLUMNS
+
+# Value marking "membership was not evaluated for this star". It is not
+# NaN, so preprocess_kinematic_data's NaN mask would not catch it, and it
+# would survive any `mem_prob_min` below -99.
+PACE_MEMBER_SENTINEL = -99.0
+
+
+def _load_pace(
+    catalog_path: str,
+    meta: DwarfMeta,
+    mem_prob_min: float = 0.8,
+    member_column: str = 'member_v11d2',
+    vlos_abs_max: Optional[float] = None,
+    apply_perspective_corr: bool = True,
+) -> KinematicData:
+    """
+    Load kinematic data from a Pace combined-structure FITS catalog.
+
+    These files (`combined_structure_<galaxy>_v<N>d<M>.fits`) are one
+    galaxy per file and combine several spectroscopic programmes, so
+    there is no single instrument to select on - the per-instrument
+    counts (`num_mmt`, `num_m2fs`, `num_vlt`, ...) vary between files and
+    are not used here. What *does* vary meaningfully is the membership
+    model: each file carries nine membership columns from different
+    versions of the mixture-model fit, and they disagree at the ~5%
+    level. `member_column` picks one; it is deliberately required to be
+    explicit in the catalog config rather than silently defaulted deep in
+    the pipeline.
+
+    The version tag in the file name (e.g. `v9d2`) is the structural-fit
+    version and does *not* correspond to the membership column versions
+    (`v10d1`, `v11d2`, ...), which is why the column cannot be inferred
+    from the file name.
+
+    Args:
+        catalog_path: Path to the `combined_structure_*.fits` file.
+        meta: Metadata for the dwarf galaxy.
+        mem_prob_min: Minimum membership probability. Ignored when
+            `member_column` is one of PACE_MEMBER_FLAG_COLUMNS, which are
+            0/1 flags rather than probabilities.
+        member_column: Which membership column to select on. Must be one
+            of PACE_MEMBER_COLUMNS.
+        vlos_abs_max: Maximum |vlos - v_sys| in km/s, or None for no cut.
+        apply_perspective_corr: If True, apply the full perspective
+            rotation correction rather than only subtracting v_sys.
+
+    Returns:
+        Container with kinematic data for the selected member stars.
+
+    Raises:
+        ValueError: If `member_column` is not a known membership column,
+            or if the selection leaves no stars.
+    """
+    if member_column not in PACE_MEMBER_COLUMNS:
+        raise ValueError(
+            f"Unknown member_column: {member_column}. "
+            f"Available columns: {PACE_MEMBER_COLUMNS}"
+        )
+
+    data = at.Table.read(catalog_path, format='fits').to_pandas()
+
+    member = data[member_column].values.astype(float)
+    # Reason: -99 means "not evaluated", not "probability -99"; dropping
+    # it here keeps a permissive mem_prob_min from letting those stars in.
+    evaluated = member != PACE_MEMBER_SENTINEL
+    if member_column in PACE_MEMBER_FLAG_COLUMNS:
+        select = evaluated & (member == 1)
+    else:
+        select = evaluated & (member > mem_prob_min)
+
+    if np.sum(select) == 0:
+        raise ValueError(
+            f"No stars selected from {catalog_path} with "
+            f"member_column={member_column} and mem_prob_min={mem_prob_min}"
+        )
+    data_cut = data[select]
+
+    ra = data_cut['ra'].values
+    dec = data_cut['dec'].values
+    vlos_raw = data_cut['vlos'].values
+    vlos_err = data_cut['vlos_error'].values
+    if member_column in PACE_MEMBER_FLAG_COLUMNS:
+        mem_prob = np.ones(len(data_cut))
+    else:
+        mem_prob = data_cut[member_column].values.astype(float)
+
+    (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
+     X_proj, Y_proj, R_proj, mask,
+     pmra_cosdec, pmdec, pmra_cosdec_err, pmdec_err, vX, vY, vX_err, vY_err) = (
+        data_utils.preprocess_kinematic_data(
+            ra, dec, vlos_raw, vlos_err, mem_prob, meta,
+            vlos_abs_max=vlos_abs_max,
+            apply_perspective_corr=apply_perspective_corr,
+        )
+    )
+
+    return KinematicData(
+        ra=ra * auni.deg,
+        dec=dec * auni.deg,
+        vlos=vlos * auni.km / auni.s,
+        vlos_err=vlos_err * auni.km / auni.s,
+        vlos_raw=vlos_raw * auni.km / auni.s,
+        X_proj=X_proj * auni.kpc,
+        Y_proj=Y_proj * auni.kpc,
+        R_proj=R_proj * auni.kpc,
+        mem_prob=mem_prob,
+        source='pace_' + member_column,
+    )
+
+
 def _load_mock_cartesian(
     catalog_path: str,
     meta: DwarfMeta,
     projection_axis: int = 0,
     num_max_stars: Optional[int] = None,
-    seed: int = 42,
+    seed: Optional[int] = None,  # None -> np.random.default_rng draws from OS entropy
 ) -> KinematicData:
     """Load kinematic data from mock catalog."""
     data = pd.read_csv(catalog_path)
@@ -415,7 +727,7 @@ def _load_mock_icrs(
     catalog_path: str,
     meta: DwarfMeta,
     num_max_stars: Optional[int] = None,
-    seed: int = 42,
+    seed: Optional[int] = None,  # None -> np.random.default_rng draws from OS entropy
     vlos_abs_max: Optional[float] = None,
     vlos_err_floor: float = 0.0,
     apply_perspective_corr: bool = True,
@@ -527,13 +839,41 @@ def load_kinematic_data(
     """
     if source not in ALL_LOADERS:
         raise ValueError(f"Unknown source: {source}. Available sources: {ALL_LOADERS}")
-    LOADERS = {
-        'desi': _load_desi,
-        'walker23': _load_walker23,
-        'bootes1_ting': _load_bootes1_ting,
-        'deimos': _load_deimos,
-        'mock_cartesian': _load_mock_cartesian,
-        'mock_icrs': _load_mock_icrs,
-    }
     loader = LOADERS[source]
+    # Reason: mem_prob_min is a named parameter here, so it never reaches
+    # **kwargs; forward it explicitly, but only to loaders that take it
+    # (the mock loaders inject no membership and do not).
+    if 'mem_prob_min' in inspect.signature(loader).parameters:
+        kwargs.setdefault('mem_prob_min', mem_prob_min)
     return loader(catalog_path, meta, **kwargs)
+
+
+LOADERS.update({
+    'desi': _load_desi,
+    'walker23': _load_walker23,
+    's5comp': _load_s5comp,
+    'deimos': _load_deimos,
+    'pace': _load_pace,
+    'mock_cartesian': _load_mock_cartesian,
+    'mock_icrs': _load_mock_icrs,
+})
+
+
+def get_loader_defaults(source: str) -> dict:
+    """Every keyword argument `source`'s loader accepts beyond
+    `catalog_path`/`meta`, mapped to its default value (`None` if the
+    parameter has none, i.e. it's required).
+
+    Lets callers (e.g. catalog_registry.py's dataset discovery) surface a
+    source's full set of options - including ones added to a loader later,
+    like DESI's `vlos_err_floor` or s5comp's `remove_binaries` -
+    without maintaining a separate, easily-stale list of them.
+    """
+    if source not in ALL_LOADERS:
+        raise ValueError(f"Unknown source: {source}. Available sources: {ALL_LOADERS}")
+    params = inspect.signature(LOADERS[source]).parameters
+    return {
+        name: (None if param.default is inspect.Parameter.empty else param.default)
+        for name, param in params.items()
+        if name not in ('catalog_path', 'meta')
+    }

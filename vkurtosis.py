@@ -240,10 +240,11 @@ def _run_mcmc(
 
             if not converged and auto_extend:
                 if total_steps >= max_steps:
-                    print(
-                        f"Warning: Reached max_steps={max_steps} without full convergence. "
-                        f"Current tau={tau}, need {convergence_factor}*tau steps."
-                    )
+                    if verbose:
+                        print(
+                            f"Warning: Reached max_steps={max_steps} without full convergence. "
+                            f"Current tau={tau}, need {convergence_factor}*tau steps."
+                        )
                     break
 
                 try:
@@ -253,30 +254,34 @@ def _run_mcmc(
                 extend_steps = min(steps_needed, max_steps - total_steps)
                 extend_steps = max(extend_steps, nsteps)
 
-                print(
-                    f"Chain not converged (n={total_steps}, tau={np.nanmax(tau):.1f}). "
-                    f"Extending by {extend_steps} steps..."
-                )
+                if verbose:
+                    print(
+                        f"Chain not converged (n={total_steps}, tau={np.nanmax(tau):.1f}). "
+                        f"Extending by {extend_steps} steps..."
+                    )
                 sampler.run_mcmc(None, extend_steps, progress=verbose)
                 total_steps += extend_steps
             elif not converged:
-                print(
-                    f"Warning: Chain may not be converged. "
-                    f"n_steps={total_steps}, tau={tau}. Consider increasing nsteps."
-                )
+                if verbose:
+                    print(
+                        f"Warning: Chain may not be converged. "
+                        f"n_steps={total_steps}, tau={tau}. Consider increasing nsteps."
+                    )
                 break
 
         except emcee.autocorr.AutocorrError as e:
             if auto_extend and total_steps < max_steps:
                 extend_steps = min(nsteps, max_steps - total_steps)
-                print(
-                    f"Autocorrelation time estimation failed: {e}. "
-                    f"Extending chain by {extend_steps} steps..."
-                )
+                if verbose:
+                    print(
+                        f"Autocorrelation time estimation failed: {e}. "
+                        f"Extending chain by {extend_steps} steps..."
+                    )
                 sampler.run_mcmc(None, extend_steps, progress=verbose)
                 total_steps += extend_steps
             else:
-                print(f"Warning: Could not estimate autocorrelation time: {e}")
+                if verbose:
+                    print(f"Warning: Could not estimate autocorrelation time: {e}")
                 tau = sampler.get_autocorr_time(quiet=True)
                 break
 
