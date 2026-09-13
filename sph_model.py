@@ -1,6 +1,7 @@
 
 import numpy as np
 import scipy.special as sc
+from numpy.polynomial.legendre import leggauss
 from scipy import constants
 from scipy.interpolate import interp1d
 from scipy.integrate import quad
@@ -10,6 +11,40 @@ import astropy.units as auni
 import astropy.cosmology as acosm
 
 _TO_KM2_S2 = 1.989e12 / 3.0856  # G unit conversion: (10^7 M_sun, kpc) -> km^2/s^2
+
+# Radial grid for sigma_r^2, in units of r_star, used by build_jeans. Stars
+# are kept inside 10 r_star and the Plummer density falls as r^-5, so
+# 1e3 r_star is far enough for the projection integral.
+GRID_MIN_RSTAR = 1e-3
+GRID_MAX_RSTAR = 1e3
+N_GRID = 300
+# Reason: the radial integrands are evaluated on their own dense log grid,
+# one decade past the sigma_r^2 grid, so the trapezoid error stays below
+# 1e-5 and the tail correction is small.
+N_INTEGRAND = 4000
+TAIL_DECADES = 1.0
+
+
+def _inward_integral(s, f):
+    """
+    int_{s_j}^inf f ds for every point of a log-spaced grid.
+
+    Trapezoid in ln s from the outer edge inward, plus a power-law tail
+    fitted to the last two points beyond the grid.
+
+    Args:
+        s: Increasing, log-spaced radii.
+        f: Integrand evaluated at s.
+
+    Returns:
+        Array of the same length as s.
+    """
+    y = f * s
+    segments = 0.5 * (y[1:] + y[:-1]) * np.diff(np.log(s))
+    inward = np.concatenate([np.cumsum(segments[::-1])[::-1], [0.0]])
+    slope = np.log(f[-1] / f[-2]) / np.log(s[-1] / s[-2])
+    tail = -f[-1] * s[-1] / (slope + 1) if slope < -1 else 0.0
+    return inward + tail
 
 
 class GeneralizedOMJeans:
@@ -36,7 +71,10 @@ class GeneralizedOMJeans:
     - vsys_pmT   : Systematic velocity offset for tangential proper motions
 
     """
-    _QUAD_EXACT_KW = dict(epsabs=1, epsrel=1, limit=200)
+    # Reason: these were epsabs=1, epsrel=1 -- the same loose setting as
+    # the old fast path, so the "high-precision" variants were not
+    # actually precise and could not serve as an independent check.
+    _QUAD_EXACT_KW = dict(epsabs=0, epsrel=1e-10, limit=400)
 
     def __init__(self, theta, min_rgrid=1e-3, max_rgrid=50, n_grid=500):
         """
@@ -71,6 +109,8 @@ class GeneralizedOMJeans:
         self.max_rgrid = max_rgrid
         self.n_grid = n_grid
         self.r_grid = np.logspace(np.log10(self.min_rgrid), np.log10(self.max_rgrid), self.n_grid)
+        self._log_sigma2_r_grid = None
+        self._log_sigma4_r_grid = None
 
     def rho(self, r):
         """Dark matter density profile (generalized NFW)."""
@@ -146,80 +186,142 @@ class GeneralizedOMJeans:
         return self.dbeta_dr(r)
 
     ### Jeans modeling methods to compute velocity dispersion profiles ###
-    def _sigma2_r(self, r):
-        """Radial velocity dispersion squared at radius r."""
-        def integrand(s):
-            return constants.G * self.M(s) / s**2 * self.nu(s) * self.gbeta(s)
+    #
+    # The integrals are done with fixed rules rather than scipy.quad. The
+    # radial ones run to infinity and quad misses the integrand's peak
+    # whenever r_star is small in kpc; the projection kernel
+    # r / sqrt(r^2 - R^2) is singular at the lower limit, and at quad's
+    # default tolerance here the line-of-sight projection came out 3-4% low
+    # (2026-09-10 benchmark). Instead sigma_r^2 and <v_r^4> are cumulative
+    # trapezoids in log r on a dense grid with a power-law tail, and the
+    # projection uses the substitution r = R cosh(u), which removes the
+    # singularity and leaves a smooth integrand that a fixed Gauss-Legendre
+    # rule handles to ~1e-5, vectorised over all radii at once.
+    #
+    # Validated against a closed-form Jeans solution, an 18-digit
+    # reimplementation and agama's distribution-function moments; see
+    # benchmark_sph_model.py. The *_exact methods below are an
+    # independent, slow cross-check.
 
-        c1 = 1.0 / (self.nu(r) * self.gbeta(r))
-        integral, _ = quad(integrand, r, np.inf, epsabs=1, epsrel=1)
-        return c1 * integral * _TO_KM2_S2
+    N_NODES = 40
+    CHUNK = 20000
 
-    def _sigma2_los_R(self, R, sigma2_r_fn):
-        """Line-of-sight velocity dispersion squared at projected radius R."""
-        def integrand(r):
-            anisotropy_term = 1 - self.beta(r) * (R / r)**2
-            kernel = r / np.sqrt(r**2 - R**2)
-            return anisotropy_term * self.nu(r) * sigma2_r_fn(r) * kernel
+    def _integrand_radii(self):
+        """Dense log grid for the radial integrals."""
+        return np.logspace(
+            np.log10(self.r_grid[0]),
+            np.log10(self.r_grid[-1]) + TAIL_DECADES, N_INTEGRAND)
 
-        integral, _ = quad(integrand, R, np.inf, epsabs=1, epsrel=1)
-        return 2.0 / self.I(R) * integral
+    def _sigma2_r_loglog(self):
+        """
+        Cache log sigma_r^2 on the dense radial grid.
 
-    def _sigma2_pmR_R(self, R, sigma2_r_fn):
-        """Radial proper motion velocity dispersion squared at projected radius R."""
-        def integrand(r):
-            anisotropy_term = 1 - self.beta(r) + self.beta(r) * (R / r)**2
-            kernel = r / np.sqrt(r**2 - R**2)
-            return anisotropy_term * self.nu(r) * sigma2_r_fn(r) * kernel
+        sigma_r^2(r) = 1 / (nu g) int_r^inf nu g G M / s^2 ds with g the
+        integrating factor of beta(r).
+        """
+        if self._log_sigma2_r_grid is None:
+            s = self._integrand_radii()
+            weight = self.nu(s) * self.gbeta(s)
+            f = constants.G * self.M(s) / s ** 2 * weight
+            sigma2 = _inward_integral(s, f) / weight * _TO_KM2_S2
+            self._log_sigma2_r_grid = (
+                np.log(s), np.log(np.maximum(sigma2, 1e-300)))
+        return self._log_sigma2_r_grid
 
-        integral, _ = quad(integrand, R, np.inf, epsabs=1, epsrel=1)
-        return 2.0 / self.I(R) * integral
+    def _sigma4_r_loglog(self):
+        """
+        Cache log <v_r^4> on the dense radial grid.
 
-    def _sigma2_pmT_R(self, R, sigma2_r_fn):
-        """Tangential proper motion velocity dispersion squared at projected radius R."""
-        def integrand(r):
-            anisotropy_term = 1 - self.beta(r)
-            kernel = r / np.sqrt(r**2 - R**2)
-            return anisotropy_term * self.nu(r) * sigma2_r_fn(r) * kernel
+        <v_r^4>(r) = 3 / (nu g') int_r^inf nu g' G M sigma_r^2 / s^2 ds
+        (Eq. C6 of Nguyen et al. 2026) with g' the integrating factor of
+        beta'; beta' = beta here.
+        """
+        if self._log_sigma4_r_grid is None:
+            log_s, log_sigma2 = self._sigma2_r_loglog()
+            s = np.exp(log_s)
+            weight = self.nu(s) * self.gbeta_prime(s)
+            f = constants.G * self.M(s) / s ** 2 * weight * np.exp(log_sigma2)
+            v4 = 3.0 * _inward_integral(s, f) / weight * _TO_KM2_S2
+            self._log_sigma4_r_grid = (log_s, np.log(np.maximum(v4, 1e-300)))
+        return self._log_sigma4_r_grid
 
-        integral, _ = quad(integrand, R, np.inf, epsabs=1, epsrel=1)
-        return 2.0 / self.I(R) * integral
+    def sigma2_r_vec(self, r):
+        """sigma_r^2 [km^2/s^2] at arbitrary radii, log-log interpolated."""
+        log_r, log_s2 = self._sigma2_r_loglog()
+        return np.exp(np.interp(np.log(r), log_r, log_s2))
 
-    def sigma2_grid_fn(self, r_grid):
-        """Compute sigma_r^2 over an array of radii and return an interpolator."""
-        return interp1d(
-            r_grid,
-            list(map(self._sigma2_r, r_grid)),
-            bounds_error=False,
-            fill_value=0.0,
-            kind="linear",
-        )
+    def sigma4_r_vec(self, r):
+        """<v_r^4> [km^4/s^4] at arbitrary radii, log-log interpolated."""
+        log_r, log_v4 = self._sigma4_r_loglog()
+        return np.exp(np.interp(np.log(r), log_r, log_v4))
+
+    def _integrand_sigma2_los(self, r, R):
+        """Projection integrand of sigma_los^2 without the Abel kernel."""
+        return ((1.0 - self.beta(r) * (R / r) ** 2) * self.nu(r)
+                * self.sigma2_r_vec(r))
+
+    def _integrand_sigma2_pmR(self, r, R):
+        """Projection integrand of sigma_pmR^2 without the Abel kernel."""
+        return ((1.0 - self.beta(r) + self.beta(r) * (R / r) ** 2)
+                * self.nu(r) * self.sigma2_r_vec(r))
+
+    def _integrand_sigma2_pmT(self, r, R):
+        """Projection integrand of sigma_pmT^2 without the Abel kernel."""
+        return (1.0 - self.beta(r)) * self.nu(r) * self.sigma2_r_vec(r)
+
+    def _integrand_sigma4_los(self, r, R):
+        """
+        Projection integrand of <v_los^4> without the Abel kernel.
+
+        Uses F_los(r, R) (Eq. C8), which drops the (beta' - beta) term;
+        that term vanishes for beta' = beta.
+        """
+        return self._F_los(r, R) * self.nu(r) * self.sigma4_r_vec(r)
+
+    def _project(self, R, integrand):
+        """
+        2 / I(R) int_R^inf integrand(r, R) r / sqrt(r^2 - R^2) dr.
+
+        Args:
+            R: Projected radii [kpc].
+            integrand: Callable of (r, R) broadcasting over both.
+
+        Returns:
+            Projected moment at each R.
+        """
+        R = np.atleast_1d(np.asarray(R, dtype=float))
+        # Reason: the (n_radii, N_NODES) work arrays reach ~1 GB for the
+        # 1e5-star samples used in the notebooks, so evaluate in chunks.
+        out = np.empty_like(R)
+        for start in range(0, len(R), self.CHUNK):
+            sl = slice(start, start + self.CHUNK)
+            out[sl] = self._project_chunk(R[sl], integrand)
+        return out
+
+    def _project_chunk(self, R, integrand):
+        """Projection integral for one chunk of radii, r = R cosh(u)."""
+        x, w = leggauss(self.N_NODES)
+        umax = np.arccosh(self.r_grid[-1] / R)
+        u = 0.5 * umax[:, None] * (x[None, :] + 1.0)
+        wu = 0.5 * umax[:, None] * w[None, :]
+        cosh_u = np.cosh(u)
+        r = R[:, None] * cosh_u
+        f = integrand(r, R[:, None]) * R[:, None] * cosh_u
+        return 2.0 / self.I(R) * np.sum(wu * f, axis=1)
 
     def sigma2_los(self, r):
-        """Compute the line-of-sight velocity dispersion profile."""
-        sigma2_r_fn = self.sigma2_grid_fn(self.r_grid)
-        return np.array([self._sigma2_los_R(R, sigma2_r_fn) for R in r])
+        """Line-of-sight velocity dispersion squared [km^2/s^2] at R [kpc]."""
+        return self._project(r, self._integrand_sigma2_los)
 
     def sigma2_pmR(self, r):
-        """Compute the radial proper motion velocity dispersion profile."""
-        sigma2_r_fn = self.sigma2_grid_fn(self.r_grid)
-        return np.array([self._sigma2_pmR_R(R, sigma2_r_fn) for R in r])
+        """Radial proper motion dispersion squared [km^2/s^2] at R [kpc]."""
+        return self._project(r, self._integrand_sigma2_pmR)
 
     def sigma2_pmT(self, r):
-        """Compute the tangential proper motion velocity dispersion profile."""
-        sigma2_r_fn = self.sigma2_grid_fn(self.r_grid)
-        return np.array([self._sigma2_pmT_R(R, sigma2_r_fn) for R in r])
+        """Tangential proper motion dispersion squared at R [kpc]."""
+        return self._project(r, self._integrand_sigma2_pmT)
 
     ### Higher-order moments code """
-    def _sigma4_r(self, r, sigma2_r_fn):
-        """ The fourth-order moment of the radial velocity distribution <v_r^4> """
-        def integrand(s):
-            return sigma2_r_fn(s) * constants.G * self.M(s) / s**2 * self.nu(s) * self.gbeta_prime(s)
-
-        c1 = 3.0 / (self.nu(r) * self.gbeta_prime(r))
-        integral, _ = quad(integrand, r, np.inf, epsabs=1, epsrel=1)
-        return c1 * integral * _TO_KM2_S2
-
     def _F_los(self, r, R):
         """ Higher-order Jeans term F_los(r, R) for the line-of-sight velocity dispersion.
         Eq. (20) in Bañares-Hernández, Read, and Júlio 2025 but without the <v_r^4> term, which is computed separately.
@@ -258,37 +360,13 @@ class GeneralizedOMJeans:
         a3 = (1 - 2 * beta_prime_r) * R**4 / r**4
         return a1 + a2 + a3
 
-    def _sigma4_los_R(self, R, sigma4_r_fn):
-        """Line-of-sight velocity dispersion squared at projected radius R."""
-        def integrand(r):
-            anisotropy_term = self._F_los(r, R)
-            kernel = r / np.sqrt(r**2 - R**2)
-            return anisotropy_term * self.nu(r) * sigma4_r_fn(r) * kernel
-
-        integral, _ = quad(integrand, R, np.inf, epsabs=1, epsrel=1)
-        return 2.0 / self.I(R) * integral
-
-    def sigma4_grid_fn(self, r_grid, sigma2_r_fn):
-        return interp1d(
-            r_grid,
-            [self._sigma4_r(r, sigma2_r_fn) for r in r_grid],
-            bounds_error=False,
-            fill_value=0.0,
-            kind="linear",
-        )
-
     def sigma4_los(self, r):
-        sigma2_r_fn = self.sigma2_grid_fn(self.r_grid)
-        sigma4_r_fn = self.sigma4_grid_fn(self.r_grid, sigma2_r_fn)
-        return np.array([self._sigma4_los_R(R, sigma4_r_fn) for R in r])
+        """Fourth line-of-sight velocity moment [km^4/s^4] at R [kpc]."""
+        return self._project(r, self._integrand_sigma4_los)
 
     def kurtosis_los(self, r):
-        """Projected LOS kurtosis profile kappa(R) = <v^4_los>(R) / sigma^2_los(R)^2."""
-        sigma2_r_fn = self.sigma2_grid_fn(self.r_grid)
-        sigma4_r_fn = self.sigma4_grid_fn(self.r_grid, sigma2_r_fn)
-        v4 = np.array([self._sigma4_los_R(R, sigma4_r_fn) for R in r])
-        s2 = np.array([self._sigma2_los_R(R, sigma2_r_fn) for R in r])
-        return v4 / s2**2
+        """Projected LOS kurtosis kappa(R) = <v^4_los>(R) / sigma^2_los(R)^2."""
+        return self.sigma4_los(r) / self.sigma2_los(r) ** 2
 
     ### High-precision "exact" variants (slow, no interpolation, tight quad tolerances) ###
     def _sigma2_r_exact(self, r):
@@ -403,6 +481,30 @@ class GeneralizedOMJeans:
         """Compute M200 = M(r200)."""
         r200 = self.r200(rho_crit=rho_crit, r_min=r_min, r_max=r_max)
         return self.M(r200).item()
+
+
+
+def build_jeans(theta, n_grid=N_GRID):
+    """
+    Construct the model with the radial grid scaled to r_star.
+
+    The default grid is fixed in kpc, so it misses the integrands whenever
+    r_star is far from 0.1 kpc. Here the bounds are set from theta[8], the
+    Plummer scale radius.
+
+    Args:
+        theta: The 12-element parameter vector [log_rho_s, log_r_s, alp,
+            bet, gam, log_r_a, two_to_beta0, two_to_betainf, rh, vsys_los,
+            vsys_pmR, vsys_pmT], radii in kpc.
+        n_grid: Number of log-spaced radii for the sigma_r^2 grid.
+
+    Returns:
+        GeneralizedOMJeans instance with the grid scaled to r_star.
+    """
+    r_star = float(np.asarray(theta)[8])
+    return GeneralizedOMJeans(
+        theta, min_rgrid=GRID_MIN_RSTAR * r_star,
+        max_rgrid=GRID_MAX_RSTAR * r_star, n_grid=n_grid)
 
 
 class TwoPopGeneralizedOMJeans:

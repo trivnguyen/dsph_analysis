@@ -1,5 +1,5 @@
 """
-Absolute accuracy benchmark for sph_model_accurate.AccurateOMJeans.
+Absolute accuracy benchmark for sph_model.GeneralizedOMJeans.
 
 Comparing the solver against a tighter integration of its own methods only
 bounds quadrature error: it reuses nu, M, beta, gbeta and I, so a wrong
@@ -20,7 +20,7 @@ Tier 3 - agama's distribution-function moments. The only check that never
     <v_los^2>. Note its QuasiSpherical DF has beta -> 1, so tier 3 covers
     two_to_betainf = 2 only.
 
-Run:  python -m dsph_analysis.benchmark_sph_model_accurate  (a few minutes,
+Run:  python -m dsph_analysis.benchmark_sph_model  (a few minutes,
       from ~/modules or anywhere with it on PYTHONPATH)
 
 Results, 2026-09-10, worst relative error in sigma2_los:
@@ -37,13 +37,13 @@ import numpy as np
 from scipy import constants
 
 from .sph_model import _TO_KM2_S2
-from .sph_model_accurate import AccurateOMJeans
+from .sph_model import GeneralizedOMJeans
 
 
 def _model(theta, rh):
-    """AccurateOMJeans on a grid wide enough that bounds do not bite."""
-    m = AccurateOMJeans(theta, min_rgrid=1e-4 * rh, max_rgrid=1e4 * rh,
-                        n_grid=200, betatype="two_to_beta")
+    """The model on a grid wide enough that bounds do not bite."""
+    m = GeneralizedOMJeans(theta, min_rgrid=1e-4 * rh,
+                           max_rgrid=1e4 * rh, n_grid=200)
     m.N_NODES = 40
     return m
 
