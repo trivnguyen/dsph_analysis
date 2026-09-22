@@ -7,9 +7,10 @@ import pocomc
 import multiprocessing as mp
 import numpy as np
 from numpy.typing import NDArray
-from numpy.polynomial.legendre import leggauss
 from scipy.special import gamma as Gamma
 from scipy.stats import uniform as sp_uniform
+
+from .quadrature import leg_nodes
 
 from gh_alternative.line_profiles import (
     ln_uniform_kernel_pdf,
@@ -157,7 +158,7 @@ def log_likelihood_genGauss_full(
     vzhigh = mu + 10.0 * sig
 
     # Gauss-Legendre nodes/weights on [-1,1], mapped to [vzlow, vzhigh]
-    xi, wi = leggauss(n_quad)
+    xi, wi = leg_nodes(n_quad)
     half = 0.5 * (vzhigh - vzlow)
     vzint = half * xi + 0.5 * (vzlow + vzhigh)  # (n_quad,)
 
@@ -247,10 +248,15 @@ def _run_mcmc(
                         )
                     break
 
-                try:
-                    steps_needed = int(convergence_factor * np.nanmax(tau)) - total_steps
-                except:
-                    print(tau)
+                # Reason: tau is all-nan when the chain has not moved
+                # (e.g. walkers started outside the prior); treat that as
+                # unconverged and extend by nsteps instead of crashing.
+                finite = tau[np.isfinite(tau)]
+                if len(finite):
+                    steps_needed = (int(convergence_factor * finite.max())
+                                    - total_steps)
+                else:
+                    steps_needed = nsteps
                 extend_steps = min(steps_needed, max_steps - total_steps)
                 extend_steps = max(extend_steps, nsteps)
 
@@ -355,8 +361,12 @@ def fit_kurtosis_los(
     if method == 'sanders_evans':
         log_like_fn = log_likelihood_se
         posterior = log_posterior_se
-        p0 = (np.random.rand(nwalkers, ndim) * np.array([200.0, 10.0, 0.332])
-              - np.array([100.0, 5.0, -0.187]))
+        # Reason: walkers used to start at mu in (100, 300), log_sigma in
+        # (5, 15) and h4 in (0.19, 0.52), all outside log_prior_se, so the
+        # chain never moved and the kurtosis came back nan. Start at the
+        # Gaussian solution instead, like the generalised-Gaussian branch.
+        p0 = (np.array([np.median(vr), np.log(np.std(vr)), 0.0])
+              + 1e-3 * np.random.randn(nwalkers, ndim))
     elif method in ('fast', 'full'):
         log_like_fn = log_likelihood_genGauss if method == 'fast' else log_likelihood_genGauss_full
         posterior = log_posterior_genGauss if method == 'fast' else log_posterior_genGauss_full
@@ -408,6 +418,9 @@ def fit_kurtosis_los(
         sigma2_s[mask_pos] = vp
         kappa_s[~(mask_neg | mask_pos)] = 3.0
         sigma2_s[~(mask_neg | mask_pos)] = sigma_s[~(mask_neg | mask_pos)]**2
+        # Reason: exp(log_sigma) is the kernel scale; the velocity
+        # dispersion is the square root of the kernel variance.
+        sigma_s = np.sqrt(sigma2_s)
     else:
         alp_s = np.exp(raw[:, 1])
         bet_s = np.exp(raw[:, 2])
