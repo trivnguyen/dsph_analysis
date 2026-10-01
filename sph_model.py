@@ -564,8 +564,9 @@ class GeneralizedOMJeans:
     def r200(self, rho_crit=None, r_min=0.001, r_max=50):
         """Compute r200 where the mean enclosed density equals 200 * rho_crit.
 
-        For profiles with gamma < 0, rho_bar(r) is non-monotone at small r.
-        The search is therefore restricted to r > r_s to avoid the inner region.
+        For profiles with gamma < 0, rho_bar(r) is non-monotone at small r:
+        it can start below the target, rise above it and fall back. r200
+        is therefore the outermost crossing in [r_min, r_max].
         """
         if rho_crit is None:
             rho_crit = acosm.Planck18.critical_density0.to(
@@ -573,20 +574,26 @@ class GeneralizedOMJeans:
             ).value
         target = 200.0 * rho_crit
 
-        if self.rho_bar(r_min) < target:
-            raise ValueError(
-                f"rho_bar(r_min={r_min:.3e}) < target at r_min. "
-                f"Value {self.rho_bar(r_min)} vs {target}. "
-                f"r200 may be smaller than r_s or the profile is too diffuse."
-            )
         if self.rho_bar(r_max) > target:
             raise ValueError(
                 f"rho_bar(r_max={r_max:.3e}) > target. "
                 f"Value {self.rho_bar(r_max)} vs {target}. "
                 f"Increase r_max to bracket r200."
             )
-
-        return brentq(lambda r: self.rho_bar(r) - target, r_min, r_max)
+        # TRADEOFF: a 200-point log grid finds the outermost crossing; a
+        # bump above the target narrower than one grid step (~0.035 dex
+        # over 7 decades) is missed. Refine the grid if that ever matters.
+        r_grid = np.geomspace(r_min, r_max, 200)
+        above = np.nonzero(self.rho_bar(r_grid) > target)[0]
+        if len(above) == 0:
+            raise ValueError(
+                f"rho_bar < target everywhere in [{r_min:.3e}, "
+                f"{r_max:.3e}]. The profile is too diffuse to reach "
+                f"200 rho_crit."
+            )
+        i = above[-1]
+        return brentq(
+            lambda r: self.rho_bar(r) - target, r_grid[i], r_grid[i + 1])
 
     def M200(self, rho_crit=None, r_min=0.001, r_max=50):
         """Compute M200 = M(r200)."""
