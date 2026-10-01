@@ -29,7 +29,7 @@ DWARF_MW_URL = (
 # depend on network access. Refresh with refresh_local_meta_table().
 DEFAULT_META_PATH = Path(__file__).parent / "data" / "dwarf_mw.csv"
 ALL_LOADERS = ('desi', 'walker23', 's5comp', 'deimos', 'pace',
-               'mock_cartesian', 'mock_icrs')
+               'geha26', 'ufdcomp', 'mock_cartesian', 'mock_icrs')
 # Populated at bottom of module, once every _load_* function is defined.
 LOADERS: dict[str, Callable] = {}
 
@@ -137,7 +137,9 @@ def load_meta(
     meta_df = pd.read_csv(meta_path)
     # check if target_key exists in meta_df
     if target_key not in meta_df['key'].values:
-        raise ValueError(f"target_key '{target_key}' not found in metadata table.")
+        available_key = np.unique(meta_df['key'].values)
+        raise ValueError(
+            f"target_key '{target_key}' not found in metadata table. Available keys: {available_key}")
     row = meta_df[meta_df['key'] == target_key].iloc[0]
 
     return DwarfMeta(
@@ -424,6 +426,59 @@ def _load_walker23(
         source='walker23',
     )
 
+def _load_geha26(
+    catalog_path: str,
+    meta: DwarfMeta,
+    mem_prob_min: float = 0.8,
+    target_system: str = '',
+    vlos_abs_max: Optional[float] = None,
+    apply_perspective_corr: bool = True,
+    remove_variables: bool = True,
+) -> KinematicData:
+    """Load kinematic data from Geha+26 catalog."""
+    data = pd.read_csv(catalog_path)
+    select = (data['keys'] == target_system) & (data['Pmem'] > mem_prob_min)
+    if remove_variables:
+        # Reason: Var == 1 flags a velocity variable (Geha+26: "we flag
+        # a star as a velocity variable if log p_10 < -1"). Var is NaN
+        # for the single-epoch stars, which were never testable, and
+        # NaN == 0 is False - so `== 0` would drop them too, taking out
+        # 80% of Draco's members. Drop only the flagged variables.
+        select &= (data['Var'] != 1)
+    if np.sum(select) == 0:
+        raise ValueError(
+            f"No stars selected for target_system={target_system} with mem_prob_min={mem_prob_min}")
+    data_cut = data[select]
+
+    ra = data_cut['RAdeg'].values
+    dec = data_cut['DEdeg'].values
+    vlos_raw = data_cut['HRV'].values
+    vlos_err = data_cut['e_HRV'].values
+    mem_prob = data_cut['Pmem'].values
+
+    (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
+     X_proj, Y_proj, R_proj, mask,
+     pmra_cosdec, pmdec, pmra_cosdec_err, pmdec_err, vX, vY, vX_err, vY_err) = (
+        data_utils.preprocess_kinematic_data(
+            ra, dec, vlos_raw, vlos_err, mem_prob, meta,
+            vlos_abs_max=vlos_abs_max,
+            apply_perspective_corr=apply_perspective_corr,
+        )
+    )
+
+    return KinematicData(
+        ra=ra * auni.deg,
+        dec=dec * auni.deg,
+        vlos=vlos * auni.km / auni.s,
+        vlos_err=vlos_err * auni.km / auni.s,
+        vlos_raw=vlos_raw * auni.km / auni.s,
+        X_proj=X_proj * auni.kpc,
+        Y_proj=Y_proj * auni.kpc,
+        R_proj=R_proj * auni.kpc,
+        mem_prob=mem_prob,
+        source='geha26',
+    )
+
 def _load_s5comp(
     catalog_path: str,
     meta: DwarfMeta,
@@ -501,66 +556,6 @@ def _load_s5comp(
         source='s5comp_' + instrument
     )
 
-def _load_deimos(
-    catalog_path: str,
-    meta: DwarfMeta,
-    mem_prob_min: float = 0.8,
-    target_system: str = '',
-    vlos_abs_max: Optional[float] = None,
-    apply_perspective_corr: bool = True,
-) -> KinematicData:
-    """Load kinematic data from DEIMOS catlaog."""
-    data = pd.read_csv(catalog_path)
-    select = (data['key'] == target_system) & (data['mem_prob'] > mem_prob_min)
-    data_cut = data[select]
-
-    ra = data_cut['RA'].values
-    dec = data_cut['DEC'].values
-    vlos_raw = data_cut['vr'].values
-    vlos_err = data_cut['vr_err'].values
-    mem_prob = data_cut['mem_prob'].values
-    R_proj = data_cut['R_kin'].values
-
-    (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
-     X_proj, Y_proj, R_proj, mask,
-     pmra_cosdec, pmdec, pmra_cosdec_err, pmdec_err, vX, vY, vX_err, vY_err) = (
-        data_utils.preprocess_kinematic_data(
-            ra, dec, vlos_raw, vlos_err, mem_prob, meta,
-            vlos_abs_max=vlos_abs_max,
-            apply_perspective_corr=apply_perspective_corr,
-        )
-    )
-
-    return KinematicData(
-        ra=ra * auni.deg,
-        dec=dec * auni.deg,
-        vlos=vlos * auni.km / auni.s,
-        vlos_err=vlos_err * auni.km / auni.s,
-        vlos_raw=vlos_raw * auni.km / auni.s,
-        X_proj=X_proj * auni.kpc,
-        Y_proj=Y_proj * auni.kpc,
-        R_proj=R_proj * auni.kpc,
-        mem_prob=mem_prob,
-        source='deimos',
-    )
-
-# Membership columns carried by every `combined_structure_*.fits` file.
-# Probability columns are cut at `mem_prob_min`; flag columns are 0/1 and
-# are used as a straight boolean selection (mem_prob is then set to 1).
-PACE_MEMBER_PROB_COLUMNS = (
-    'member_v10d1', 'member_v10d2', 'member_v11d1', 'member_v11d2',
-    'member_all_v10', 'member_all_v11',
-)
-PACE_MEMBER_FLAG_COLUMNS = (
-    'member_candidate', 'member_final', 'member_zscore',
-)
-PACE_MEMBER_COLUMNS = PACE_MEMBER_PROB_COLUMNS + PACE_MEMBER_FLAG_COLUMNS
-
-# Value marking "membership was not evaluated for this star". It is not
-# NaN, so preprocess_kinematic_data's NaN mask would not catch it, and it
-# would survive any `mem_prob_min` below -99.
-PACE_MEMBER_SENTINEL = -99.0
-
 
 def _load_pace(
     catalog_path: str,
@@ -593,7 +588,7 @@ def _load_pace(
         catalog_path: Path to the `combined_structure_*.fits` file.
         meta: Metadata for the dwarf galaxy.
         mem_prob_min: Minimum membership probability. Ignored when
-            `member_column` is one of PACE_MEMBER_FLAG_COLUMNS, which are
+            `member_column` is one of MEMBER_FLAG_COLUMNS, which are
             0/1 flags rather than probabilities.
         member_column: Which membership column to select on. Must be one
             of PACE_MEMBER_COLUMNS.
@@ -608,10 +603,27 @@ def _load_pace(
         ValueError: If `member_column` is not a known membership column,
             or if the selection leaves no stars.
     """
-    if member_column not in PACE_MEMBER_COLUMNS:
+    # Membership columns carried by every `combined_structure_*.fits` file.
+    # Probability columns are cut at `mem_prob_min`; flag columns are 0/1 and
+    # are used as a straight boolean selection (mem_prob is then set to 1).
+    MEMBER_PROB_COLUMNS = (
+        'member_v10d1', 'member_v10d2', 'member_v11d1', 'member_v11d2',
+        'member_all_v10', 'member_all_v11',
+    )
+    MEMBER_FLAG_COLUMNS = (
+        'member_candidate', 'member_final', 'member_zscore',
+    )
+    MEMBER_COLUMNS = MEMBER_PROB_COLUMNS + MEMBER_FLAG_COLUMNS
+
+    # Value marking "membership was not evaluated for this star". It is not
+    # NaN, so preprocess_kinematic_data's NaN mask would not catch it, and it
+    # would survive any `mem_prob_min` below -99.
+    MEMBER_SENTINEL = -99.0
+
+    if member_column not in MEMBER_COLUMNS:
         raise ValueError(
             f"Unknown member_column: {member_column}. "
-            f"Available columns: {PACE_MEMBER_COLUMNS}"
+            f"Available columns: {MEMBER_COLUMNS}"
         )
 
     data = at.Table.read(catalog_path, format='fits').to_pandas()
@@ -619,8 +631,8 @@ def _load_pace(
     member = data[member_column].values.astype(float)
     # Reason: -99 means "not evaluated", not "probability -99"; dropping
     # it here keeps a permissive mem_prob_min from letting those stars in.
-    evaluated = member != PACE_MEMBER_SENTINEL
-    if member_column in PACE_MEMBER_FLAG_COLUMNS:
+    evaluated = member != MEMBER_SENTINEL
+    if member_column in MEMBER_FLAG_COLUMNS:
         select = evaluated & (member == 1)
     else:
         select = evaluated & (member > mem_prob_min)
@@ -636,7 +648,7 @@ def _load_pace(
     dec = data_cut['dec'].values
     vlos_raw = data_cut['vlos'].values
     vlos_err = data_cut['vlos_error'].values
-    if member_column in PACE_MEMBER_FLAG_COLUMNS:
+    if member_column in MEMBER_FLAG_COLUMNS:
         mem_prob = np.ones(len(data_cut))
     else:
         mem_prob = data_cut[member_column].values.astype(float)
@@ -662,6 +674,138 @@ def _load_pace(
         R_proj=R_proj * auni.kpc,
         mem_prob=mem_prob,
         source='pace_' + member_column,
+    )
+
+
+def _ufdcomp_sources(columns) -> list:
+    """Source tokens present in a ufdcomp file, epoch suffix stripped."""
+    out = set()
+    for c in columns:
+        if c.startswith('vel_') and not c.startswith('vel_err_') \
+                and not c.startswith('vel_q_'):
+            tok = c[len('vel_'):]
+            out.add(re.sub(r'_e\d+$', '', tok))
+    return sorted(out)
+
+
+def _load_ufdcomp(
+    catalog_path: str,
+    meta: DwarfMeta,
+    mem_prob_min: float = 0.8,
+    vel_source: str = '',
+    mem_source: str = 'pace_fixed',
+    epoch: int = 1,
+    vlos_abs_max: Optional[float] = None,
+    apply_perspective_corr: bool = True,
+    apply_quality_cut: bool = True,
+) -> KinematicData:
+    """Load one source's velocities from a ufdcomp compilation.
+
+    These files never average anything: each `vel_<source>` column holds
+    single measurements from one paper/reduction, and repeat observations
+    of a star sit in `_e1`, `_e2`, ... columns. This loader therefore
+    selects exactly one source and one epoch rather than combining them.
+
+    Parameters
+    ----------
+    vel_source : str
+        Source token, e.g. 'walker23_hecto', 'simon11_deimos',
+        'walker15_m2fs'. The token is <paper>_<instrument>; a galaxy can
+        carry several sources sharing an instrument, and they are
+        deliberately distinct. Required.
+    mem_source : str, optional
+        Which membership to select on. 'pace_fixed' (default) or
+        'pace_gauss' use the Pace et al. 2022 astrometric/photometric
+        membership, which is independent of every velocity here but is
+        Gaia-limited and NaN for fainter targets. 'published' uses the
+        chosen source's own membership flag, where it has one.
+    epoch : int, optional
+        Which epoch to use when `vel_source` observed stars more than
+        once. Default 1.
+    apply_quality_cut : bool, optional
+        Apply the source's `vel_q_` flag where present (the documented
+        Walker quality cut). Default True.
+    """
+    data = pd.read_csv(catalog_path)
+    available = _ufdcomp_sources(data.columns)
+    if vel_source not in available:
+        raise ValueError(
+            f"Unknown vel_source: {vel_source!r}. "
+            f"Available sources: {available}"
+        )
+
+    base = f'vel_{vel_source}'
+    if base in data.columns:
+        suffix = ''
+    else:
+        suffix = f'_e{epoch}'
+        if base + suffix not in data.columns:
+            epochs = sorted(
+                int(m.group(1)) for m in
+                (re.search(rf'^vel_{re.escape(vel_source)}_e(\d+)$', c)
+                 for c in data.columns) if m
+            )
+            raise ValueError(
+                f"{vel_source!r} has no epoch {epoch}. Available: {epochs}"
+            )
+    vel_key = base + suffix
+    err_key = f'vel_err_{vel_source}{suffix}'
+    qual_key = f'vel_q_{vel_source}{suffix}'
+
+    if mem_source == 'published':
+        mem_key = f'mem_{vel_source}{suffix}'
+        if mem_key not in data.columns:
+            raise ValueError(
+                f"{vel_source!r} ships no membership column; use "
+                f"mem_source='pace_fixed' or 'pace_gauss'."
+            )
+    else:
+        mem_key = f'mem_{mem_source}'
+        if mem_key not in data.columns:
+            raise ValueError(
+                f"Unknown mem_source: {mem_source!r}. Use 'pace_fixed', "
+                f"'pace_gauss' or 'published'."
+            )
+
+    select = np.isfinite(data[vel_key].values)
+    select &= data[mem_key].values > mem_prob_min
+    if apply_quality_cut and qual_key in data.columns:
+        select &= data[qual_key].values == 1.0
+    if np.sum(select) == 0:
+        raise ValueError(
+            f"No stars selected for vel_source={vel_source!r}, "
+            f"mem_source={mem_source!r}, mem_prob_min={mem_prob_min}"
+        )
+    data_cut = data[select]
+
+    ra = data_cut['RA'].values
+    dec = data_cut['Dec'].values
+    vlos_raw = data_cut[vel_key].values
+    vlos_err = data_cut[err_key].values
+    mem_prob = data_cut[mem_key].values
+
+    (ra, dec, vlos_raw, vlos_err, mem_prob, vlos,
+     X_proj, Y_proj, R_proj, mask,
+     pmra_cosdec, pmdec, pmra_cosdec_err, pmdec_err,
+     vX, vY, vX_err, vY_err) = (
+        data_utils.preprocess_kinematic_data(
+            ra, dec, vlos_raw, vlos_err, mem_prob, meta,
+            vlos_abs_max=vlos_abs_max,
+            apply_perspective_corr=apply_perspective_corr,
+        )
+    )
+
+    return KinematicData(
+        ra=ra * auni.deg,
+        dec=dec * auni.deg,
+        vlos=vlos * auni.km / auni.s,
+        vlos_err=vlos_err * auni.km / auni.s,
+        vlos_raw=vlos_raw * auni.km / auni.s,
+        X_proj=X_proj * auni.kpc,
+        Y_proj=Y_proj * auni.kpc,
+        R_proj=R_proj * auni.kpc,
+        mem_prob=mem_prob,
+        source='ufdcomp_' + vel_source,
     )
 
 
@@ -852,8 +996,9 @@ LOADERS.update({
     'desi': _load_desi,
     'walker23': _load_walker23,
     's5comp': _load_s5comp,
-    'deimos': _load_deimos,
+    'geha26': _load_geha26,
     'pace': _load_pace,
+    'ufdcomp': _load_ufdcomp,
     'mock_cartesian': _load_mock_cartesian,
     'mock_icrs': _load_mock_icrs,
 })
