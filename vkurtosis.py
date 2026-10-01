@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 from scipy.special import gamma as Gamma
 from scipy.stats import uniform as sp_uniform
 
+from .data_utils import radial_bin_windows
 from .quadrature import leg_nodes
 
 from gh_alternative.line_profiles import (
@@ -440,6 +441,7 @@ def calc_kurtosis_los_binned(
     ntracer_per_bin: int = 50,
     nbins_min: int = 4,
     nbins_max: int = 8,
+    overlap: float = 0.0,
     verbose: bool = True,
     sampler_args: Optional[dict] = None,
 ) -> dict:
@@ -466,6 +468,13 @@ def calc_kurtosis_los_binned(
         Minimum number of bins.
     nbins_max : int, optional
         Maximum number of bins.
+    overlap : float, optional
+        Fraction of each radial window shared with the next, in
+        [0, 1). 0 (default) gives the historical contiguous
+        equal-count bins. Overlapping windows are NOT independent -
+        neighbouring points share tracers - so treat them as a way to
+        see the shape of a profile from a small sample, not as extra
+        information.
     verbose : bool, optional
         Whether to print verbose output during fitting.
     sampler_args : dict | None, optional
@@ -487,24 +496,16 @@ def calc_kurtosis_los_binned(
         - 'kappa_em': 16th percentile error
         - 'kappa_ep': 84th percentile error
     """
-    if bins is None:
-        num_tracers = len(R_proj)
-        nbins = int(np.ceil(num_tracers / ntracer_per_bin))
-        nbins = np.clip(nbins, nbins_min, nbins_max)
+    windows = radial_bin_windows(
+        R_proj, bins=bins, ntracer_per_bin=ntracer_per_bin,
+        nbins_min=nbins_min, nbins_max=nbins_max, overlap=overlap)
 
-        sorted_R = np.sort(R_proj)
-        bin_indices = np.array_split(np.arange(num_tracers), nbins)
-        bins = np.array(
-            [sorted_R[idx[0]] for idx in bin_indices] + [sorted_R[-1] * 1.001]
-        )
-
-    nbins = len(bins) - 1
     R_mid, R_lo, R_hi = [], [], []
     sigma, sigma_lo, sigma_hi = [], [], []
     kappa, kappa_lo, kappa_hi = [], [], []
 
-    for i in range(nbins):
-        bin_mask = (R_proj >= bins[i]) & (R_proj < bins[i + 1])
+    for bin_lo, bin_hi in windows:
+        bin_mask = (R_proj >= bin_lo) & (R_proj < bin_hi)
         if np.sum(bin_mask) < 3:
             continue
 

@@ -253,6 +253,94 @@ def calc_mass_enclosed_binned(
     return mass_enc, log_rbins
 
 
+
+def radial_bin_windows(
+    R_proj: NDArray[np.floating],
+    bins: Optional[NDArray[np.floating]] = None,
+    ntracer_per_bin: int = 50,
+    nbins_min: int = 4,
+    nbins_max: int = 8,
+    overlap: float = 0.0,
+) -> list:
+    """Radial windows for a binned profile, optionally overlapping.
+
+    Shared by `vdisp.calc_vdisp_los_binned` and
+    `vkurtosis.calc_kurtosis_los_binned` so the two cannot drift apart.
+
+    Parameters
+    ----------
+    R_proj : NDArray[np.floating]
+        Projected radii in kpc. Not assumed sorted.
+    bins : NDArray[np.floating] | None, optional
+        Explicit bin edges in kpc. Given, they are used as-is and
+        every other argument is ignored.
+    ntracer_per_bin : int, optional
+        Target tracers per window, for equal-count binning.
+    nbins_min, nbins_max : int, optional
+        Clip on the resulting window count. The pipeline pins a count
+        by passing the same value for both.
+    overlap : float, optional
+        Fraction of a window shared with the next one, in [0, 1).
+        0 tiles the data contiguously and reproduces the historical
+        equal-count edges exactly. 0.5 steps each window by half its
+        width, roughly doubling the number of profile points.
+
+    Returns
+    -------
+    list
+        `(lo, hi)` pairs, each half-open: `lo <= R < hi`.
+
+    Raises
+    ------
+    ValueError
+        If `overlap` is outside [0, 1), or combined with explicit
+        `bins` - overlapping windows cannot be written as edges, so
+        silently ignoring one of the two would be worse than refusing.
+
+    Notes
+    -----
+    Overlapping windows are NOT independent: neighbouring points share
+    tracers, so their errors are correlated and a chi-square over them
+    would be wrong. They are a way to see a profile's shape with a
+    small sample, not extra information.
+    """
+    if not 0.0 <= overlap < 1.0:
+        raise ValueError(
+            f'overlap must be in [0, 1), got {overlap}')
+    if bins is not None:
+        if overlap:
+            raise ValueError(
+                'explicit `bins` and `overlap` are mutually exclusive: '
+                'overlapping windows cannot be expressed as edges')
+        edges = np.asarray(bins, dtype=float)
+        return [(edges[i], edges[i + 1]) for i in range(len(edges) - 1)]
+
+    R_sorted = np.sort(np.asarray(R_proj, dtype=float))
+    num_tracers = len(R_sorted)
+    nbins = int(np.ceil(num_tracers / ntracer_per_bin))
+    nbins = int(np.clip(nbins, nbins_min, nbins_max))
+
+    if overlap == 0.0:
+        # Reason: kept byte-for-byte as the historical equal-count
+        # path, so overlap=0 cannot move a single published bin edge.
+        bin_indices = np.array_split(np.arange(num_tracers), nbins)
+        edges = np.array(
+            [R_sorted[idx[0]] for idx in bin_indices]
+            + [R_sorted[-1] * 1.001]
+        )
+        return [(edges[i], edges[i + 1]) for i in range(len(edges) - 1)]
+
+    width = int(np.ceil(num_tracers / nbins))
+    step = max(1, int(round(width * (1.0 - overlap))))
+    windows = []
+    for start in range(0, num_tracers, step):
+        stop = start + width
+        if stop >= num_tracers:
+            windows.append((R_sorted[start], R_sorted[-1] * 1.001))
+            break
+        windows.append((R_sorted[start], R_sorted[stop]))
+    return windows
+
 def calc_sigma_spherical(
     pos: NDArray[np.floating],
     vel: NDArray[np.floating],
